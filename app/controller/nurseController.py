@@ -15,7 +15,7 @@ from datetime import datetime
 from fastapi import Request, Response, HTTPException
 import logging
 from app.utils.serialize_row import serialize_row
-
+from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
 
 logger = logging.getLogger(__name__)
 
@@ -624,7 +624,7 @@ async def nurse_chat_bot(sender, text):
         # Helper function to format date
         def format_date(date_str: str) -> str:
             dt = datetime.strptime(normalize_date(date_str), "%Y-%m-%d")
-            return dt.strftime("%m-%d-%Y")
+            return convert_to_md(dt)
 
         # Confirmation section (get shifts by facility, check validity, status, etc.)
         if reply_message.get("confirmation"):

@@ -8,7 +8,7 @@ import asyncio
 from datetime import datetime
 from fastapi import Request, Response, HTTPException
 from app.utils.serialize_row import serialize_row
-
+from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
 async def create_shift(
     created_by: str,
     nurse_type: str,
@@ -115,6 +115,7 @@ async def search_shift(nurse_type, shift, date, created_by):
                         if result:
                             nurse_name = result['first_name']
                     formatted_date = normalize_date(shift_row['date'])
+                    formatted_date = convert_to_md(formatted_date)
                     message += f"{i + 1}. {shift_row['nurse_type']} nurse ({nurse_name}) at {name}, {location} on {formatted_date}\n ID:{shift_row['id']}\n"
                 message += "\nPlease reply with the number of the shift you'd like to cancel."
                 await update_coordinator_chat_history(created_by, message, 'sent')
@@ -128,18 +129,10 @@ async def search_shift(nurse_type, shift, date, created_by):
 
 async def delete_shift(shift_id, created_by, nurse_id, nurse_type, shift_value, location, date, name):
     try:
-        # Delete the shift
-        await db.execute("DELETE FROM shift_tracker WHERE id = $1", shift_id)
-
-        # Format date
-        formatted_date = normalize_date(date)
-
-        # Notify coordinator
-        coordinator_message = (
-            f"The cancellation request you raised for the {nurse_type} nurse for {shift_value} "
-            f"at {name} scheduled on {formatted_date} has been cancelled successfully."
-        )
-        asyncio.create_task(send_message(created_by, coordinator_message))
+        # Delete the shift and check if it was deleted
+        result = await db.execute("DELETE FROM shift_tracker WHERE id = $1", shift_id)
+        if result == "DELETE 0":
+            return False  # No shift deleted
 
         # Notify nurse, if assigned
         if nurse_id:
@@ -148,17 +141,19 @@ async def delete_shift(shift_id, created_by, nurse_id, nurse_type, shift_value, 
                 FROM nurses 
                 WHERE id = $1
             """, nurse_id)
-
             if nurse_data:
                 nurse_phone_number = nurse_data['mobile_number']
+                formatted_date = normalize_date(date)
+                formatted_date = convert_to_md(formatted_date)
                 nurse_message = (
                     f"The shift you confirmed scheduled on {formatted_date} at {name} has been cancelled "
                     "by the coordinator. We are sorry for any inconvenience caused."
                 )
                 asyncio.create_task(send_message(nurse_phone_number, nurse_message)) 
-
+        return True
     except Exception as error:
         print('Error deleting shift:', error)
+        return False
 
 async def search_shift_by_id(shift_id: int):
     # Get shift details
@@ -210,6 +205,7 @@ async def shift_cancellation_nurse(nurse_type, shift, date, phone_number):
 
         if not rows:
             formatted_date = normalize_date(date_obj)
+            formatted_date = convert_to_md(formatted_date)
             message = f"The cancellation request you raised for the {nurse_type} nurse for {shift} shift scheduled on {formatted_date} does not exist or has been deleted already."
             asyncio.create_task(send_message(phone_number, message)) 
             return
@@ -236,7 +232,7 @@ async def shift_cancellation_nurse(nurse_type, shift, date, phone_number):
         location = facility['city_state_zip'] if facility else ''
         name = facility['name'] if facility else ''
         formatted_date = normalize_date(date_obj)
-
+        formatted_date = convert_to_md(formatted_date)
         # Message to nurse
         message_to_nurse = f"The shift you confirmed at {name} on {formatted_date} for {nurse_type} has been cancelled."
         asyncio.create_task(send_message(phone_number, message_to_nurse)) 
@@ -256,7 +252,7 @@ async def shift_cancellation_nurse(nurse_type, shift, date, phone_number):
 
         if coordinator:
             message_to_creator = (
-                f"Hello! Your shift request at {name} on {formatted_date} for a {nurse_type} nurse has been cancelled by the nurse. "
+                f"Hello! Your shift request on {formatted_date} for a {nurse_type} nurse has been cancelled by the nurse. "
                 f"We are looking for another to help cover it. Sorry for any inconvenience caused."
             )
             asyncio.create_task(send_message(coordinator['coordinator_phone'], message_to_creator))
@@ -281,7 +277,7 @@ async def check_shift_validity(shift_id: int, nurse_phone_number: str) -> bool:
     date = shift_data['date']
 
     formatted_date = normalize_date(date)
-
+    formatted_date = datetime.strptime(formatted_date, "%Y-%m-%d").strftime("%m-%d-%Y")
     facility = await db.fetchrow("""
         SELECT lat, lng, name
         FROM facilities
@@ -385,7 +381,7 @@ async def search_by_date(date: str, facility_name: str, nurse_type: str, shift: 
     """, facility_name)
 
     if not facility:
-        raise Exception(f"Facility not found for name: {facility_name}")
+        return None  # Facility not found
     
     facility_id = facility['id']
 
@@ -398,7 +394,7 @@ async def search_by_date(date: str, facility_name: str, nurse_type: str, shift: 
     """, date, facility_id, nurse_type, shift)
 
     if not shift_row:
-        raise Exception("No shift found for given parameters")
+        return None  # No matching shift found
 
     return shift_row['id']
 
@@ -642,10 +638,10 @@ async def admin_delete_shift(request: Request, response: Response, shift_id: int
         # 4. Format date
         formatted_date = normalize_date(shift_date)
         formatted_date = datetime.strptime(formatted_date, "%Y-%m-%d").strftime("%m-%d-%Y")
-
+        formatted_date = convert_to_md(formatted_date)
         message = (
             f"Hello, the shift for {nurse_type} on {formatted_date} for {shift_type} "
-            f"shift at {facility_name} has been deleted by the admin."
+            f"shift has been deleted by the admin."
         )
 
         if phone:
@@ -722,14 +718,14 @@ async def admin_add_shift(request: Request, response: Response):
         # Format date
         formatted_date = normalize_date(schedule_date)
         formatted_date = datetime.strptime(formatted_date, "%Y-%m-%d").strftime("%m-%d-%Y")
-
+        formatted_date = convert_to_md(formatted_date)
         message_nurse = (
             f"A new shift at {facility_name} on {formatted_date} for {shift} shift. "
             f"Notes: {additional_notes} has been assigned to you by the admin."
         )
 
         message_coordinator = (
-            f"{nurse_first_name} {nurse_last_name} new nurse at {facility_name} on {formatted_date} for {shift} shift "
+            f"{nurse_first_name} {nurse_last_name} new nurse on {formatted_date} for {shift} shift "
             f"has been booked for you by the admin."
         )
 
@@ -789,6 +785,7 @@ async def admin_edit_shift(request: Request, response: Response, id: int):
                 old_nurse = await db.fetchrow("SELECT first_name, mobile_number FROM nurses WHERE id = $1", old_nurse_id)
                 if old_nurse:
                     formatted_date = datetime.strptime(str(old_date), "%Y-%m-%d").strftime("%m-%d-%Y")
+                    formatted_date = convert_to_md(formatted_date)
                     message = f"Hi {old_nurse['first_name']}, your previously assigned shift for {old_position} on {formatted_date} ({old_shift} shift) at {facility_name} has been reassigned to another nurse. Thank you for your support."
                     asyncio.create_task(send_message(old_nurse["mobile_number"], message))
 
@@ -796,6 +793,7 @@ async def admin_edit_shift(request: Request, response: Response, id: int):
                 new_nurse = await db.fetchrow("SELECT first_name, mobile_number FROM nurses WHERE id = $1", nurse)
                 if new_nurse:
                     formatted_date = schedule_date
+                    formatted_date = convert_to_md(formatted_date)
                     message = f"Hi {new_nurse['first_name']}, you've been scheduled for a new {position} shift on {formatted_date} ({shift} shift) at {facility_name}. Notes: {additional_notes}"
                     asyncio.create_task(send_message(new_nurse["mobile_number"], message))
 
@@ -803,6 +801,7 @@ async def admin_edit_shift(request: Request, response: Response, id: int):
             nurse_details = await db.fetchrow("SELECT first_name, mobile_number FROM nurses WHERE id = $1", nurse)
             if nurse_details:
                 formatted_date = schedule_date
+                formatted_date = convert_to_md(formatted_date)
                 message = f"Hi {nurse_details['first_name']}, there have been updates to your shift: {position} on {formatted_date} ({shift} shift) at {facility_name}. Notes: {additional_notes}. Please take note of the changes."
                 asyncio.create_task(send_message(nurse_details["mobile_number"], message))
 
@@ -817,21 +816,24 @@ async def admin_edit_shift(request: Request, response: Response, id: int):
                 old_coord = await db.fetchrow("SELECT coordinator_first_name, coordinator_phone FROM coordinator WHERE id = $1", old_coordinator_id)
                 if old_coord:
                     formatted_date = datetime.strptime(str(old_date), "%Y-%m-%d").strftime("%m-%d-%Y")
-                    message = f"Dear {old_coord['coordinator_first_name']}, the coordination responsibility for the {old_position} shift on {formatted_date} ({old_shift} shift) at {facility_name} has been assigned to another coordinator. Thank you for your efforts."
+                    formatted_date = convert_to_md(formatted_date)
+                    message = f"Dear {old_coord['coordinator_first_name']}, the coordination responsibility for the {old_position} shift on {formatted_date} ({old_shift} shift)has been assigned to another coordinator. Thank you for your efforts."
                     asyncio.create_task(send_message(old_coord["coordinator_phone"], message))
 
             if coordinator:
                 new_coord = await db.fetchrow("SELECT coordinator_first_name, coordinator_phone FROM coordinator WHERE id = $1", coordinator)
                 if new_coord:
                     formatted_date = schedule_date
-                    message = f"Dear {new_coord['coordinator_first_name']}, you are now responsible for overseeing the {position} shift on {formatted_date} ({shift} shift) at {facility_name}, assigned to nurse {nurse_name}. Please ensure smooth coordination."
+                    formatted_date = convert_to_md(formatted_date)
+                    message = f"Dear {new_coord['coordinator_first_name']}, you are now responsible for overseeing the {position} shift on {formatted_date} ({shift} shift), assigned to nurse {nurse_name}. Please ensure smooth coordination."
                     asyncio.create_task(send_message(new_coord["coordinator_phone"], message))
 
         elif coordinator:
             coord = await db.fetchrow("SELECT coordinator_first_name, coordinator_phone FROM coordinator WHERE id = $1", coordinator)
             if coord:
                 formatted_date = schedule_date
-                message = f"Dear {coord['coordinator_first_name']}, the shift details under your coordination have been updated. New details: {position} on {formatted_date} ({shift} shift) at {facility_name}, assigned to nurse {nurse_name}. Additional Notes: {additional_notes}. Please review."
+                formatted_date = convert_to_md(formatted_date)
+                message = f"Dear {coord['coordinator_first_name']}, the shift details under your coordination have been updated. New details: {position} on {formatted_date} ({shift} shift), assigned to nurse {nurse_name}. Additional Notes: {additional_notes}. Please review."
                 asyncio.create_task(send_message(coord["coordinator_phone"], message))
 
         # Update shift in DB
@@ -846,4 +848,3 @@ async def admin_edit_shift(request: Request, response: Response, id: int):
     except Exception as e:
         print("Error editing shift:", str(e))
         raise HTTPException(status_code=500, detail="Server error")
-    
