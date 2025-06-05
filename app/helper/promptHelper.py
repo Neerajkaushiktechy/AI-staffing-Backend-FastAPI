@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from datetime import datetime
 from app.database import db
+from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
 load_dotenv()
 
 api_key = os.getenv("GEMINI_API_KEY")
@@ -160,7 +161,103 @@ json
 }}
 
 Constraints: Ensure that the bot can handle variations in user questions while still identifying the intent accurately. If the user's input is vague, infer the most likely follow-up question based on context. If the user has not provided the name of the nurse ask him about it.
+
+###shift Information management:
+
+The user might want to know about the existing shifts he has booked. Read the message carefully and see if the user is asking about his/her booked shifts. If so, generate a response in this format:
+{{
+"message": "A friendly message for the user",
+"shift_information": {{
+nurse_type: "nurse type",
+shift: "shift type",
+date: "YYYY-MM-DD",
+status: "status of the shift",
+}}
+}}
+
+Example:
+user: Hey what shifts I have booked?
+(Here since the user has not provided any details about the shift we will return null for all the fields)
+
+bot: {{
+"message": "A friendly message for the user",
+"shift_information": {{
+nurse_type: null,
+shift: null,
+date: null,
+status: null
+}}
+}}
+
+example 2:
+user: Hey what shifts I have booked for 25 April 2025?
+bot: {{
+"message": "Here are the shifts you have booked for 25 April 2025",
+"shift_information": {{
+nurse_type: null,
+shift: null,
+date: "2025-04-25",
+status: null
+}}
+}}
+if the user has provided the shift type, date and nurse type then fill them in the response like this:
+bot: {{
+"message": "Here are the shifts you have booked for 25 April 2025",
+"shift_information": {{
+nurse_type: "RN",
+shift: "PM",
+date: "2025-04-25",
+status: null
+}}
+}}
+
+The status of the shift can be either filled or open. If the user asks which confirmed shifts I have then fill the status as filled. Filled status is for the shifts that have been assigned to a nurse and open status is for the shifts that are available for booking.
+aslways fill status as wither null filled or open depending on the waht the uesr has asked. The user can also ask about the shift for a time period for example the week or month in theat case fill the date in a manner that covers the whole week or month like this:
+
+example:
+user: what shifts I have for this week?
+bot: {{
+"message": "Here are the shifts you have booked for 25 April 2025",
+"shift_information": {{
+nurse_type: null,
+shift: null,
+date: null,
+start_date: "2025-04-20",
+end_date: "2025-04-26",
+status: null,
+}}
+}}
+
+user: what shifts I have for this month?
+bot: {{
+"message": "Here are the shifts you have booked for April 2025",
+"shift_information": {{
+nurse_type: null,
+shift: null,
+date: null,
+start_date: "2025-04-01",
+end_date: "2025-04-30",
+status: null,
+}}
+}}
+
+only use the start_date and end_date if the user has asked for a week or month otherwise do not use them.
+Do not ask for shift details if the user has not provided any. If the user has simply asked for the shift he has booked withour specifying any conditions there is no need to ask for shift details.
+
+Example:
+user: what shifts I have booked?
+bot: {{
+"message": "Here are the shifts you have booked",
+"shift_information": {{
+nurse_type: null,
+shift: null,
+date: null,
+status: null
+}}
+}}
 Be careful about perceiving intents.
+The date can be provided in different formats like YYYY-MM-DD, MM-DD-YYYY, or even as a string like "today" or "tomorrow". You need to convert it to a valid date format for PostgreSQL database.
+For example, if the user provides the date as "25 April 2025", you need to convert it to "2025-04-25". If the user provides the date as "today" or "tomorrow", you need to use the current date or tomorrow's date respectively. If the user provdes the date as "25-04-2025" or "04-25-2025", you need to convert it to "2025-04-25". If the user provides date as 6/4 it means 4th june. You need to convert it to "2025-06-04". 
 check for previous message to deduce the intent and judge the message accordingly. Do not make any assumptions about the user's intent.
 make sure to ask for full details which are required for every scenario
 Message from sender: "{text}"
@@ -363,6 +460,9 @@ Bot: {{
 "follow_up_reply": true
 }}
 Be careful about perceiving intents.
+The date can be provided in different formats like YYYY-MM-DD, MM-DD-YYYY, or even as a string like "today" or "tomorrow". You need to convert it to a valid date format for PostgreSQL database.
+For example, if the user provides the date as "25 April 2025", you need to convert it to "2025-04-25". If the user provides the date as "today" or "tomorrow", you need to use the current date or tomorrow's date respectively. If the user provdes the date as "25-04-2025" or "04-25-2025", you need to convert it to "2025-04-25". If the user provides date as 6/4 it means 4th june. You need to convert it to "2025-06-04". 
+Make use of correct year by referencing the current Date: {current_date}
 check for previous message to deduce the intent and judge the message accordingly. Do not make any assumptions about the user's intent.
 make sure to ask for full details which are required for every scenario
       Message from sender: "{text}". You will also be given the past message history for a nurse make use of past messages if you can to make the messages more friendly. 
@@ -399,7 +499,8 @@ async def generate_message_for_nurse_ai(nurse_type: str, shift: str, date: str, 
 
         # Format date to MM-DD-YYYY
         formatted_date = datetime.strptime(date, "%Y-%m-%d").strftime("%m-%d-%Y")
-
+        formatted_date = convert_to_md(formatted_date)
+        print(f"Formatted date: {formatted_date}")
         # Prompt for Gemini
         prompt = f"""
 You are an AI chatbot responsible for crafting friendly messages to nurses about job openings at local facilities. Your task is to generate a text message based on the following details:
@@ -430,7 +531,7 @@ You are an AI chatbot responsible for crafting friendly messages to nurses about
 - Ensure the tone is friendly and inviting.
 
 ### Constraints:
-- Ensure the date provided is in MM-DD-YYYY format.
+- send the date exactly as it is provided in the date field
 """
 
         response = model.generate_content(prompt)

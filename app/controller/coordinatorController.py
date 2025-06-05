@@ -10,6 +10,7 @@ import asyncio
 from fastapi import Request, Response, HTTPException
 from app.utils.serialize_row import serialize_row
 from fastapi.responses import JSONResponse
+from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
 
 async def update_coordinator(shift_id: int, nurse_phone_number: str):
     try:
@@ -34,10 +35,11 @@ async def update_coordinator(shift_id: int, nurse_phone_number: str):
             print("Date object:", date_obj)
             y, m, d = date_obj.split("-")
             final_date = f"{m.zfill(2)}-{d.zfill(2)}-{y}"
+            final_date = convert_to_md(final_date)
             print("Final date:", final_date)
             message = (
-                f"Hello! Your shift requested at {shift_info['name']}, on {final_date} "
-                f"for {shift_info['shift']} shift has been filled. "
+                f"Hello! Your shift requested on {final_date} "
+                f"for {nurse['nurse_type']} {shift_info['shift']} shift has been filled. "
                 f"This shift will be covered by {nurse['first_name']}. "
                 f"You can reach out via {nurse['mobile_number']}."
             )
@@ -353,6 +355,74 @@ async def admin_delete_coordinator(request: Request, response: Response, id: int
         print("Error deleting coordinator:", str(e))
         raise HTTPException(status_code=500, detail="An error has occurred")
 
+from fastapi import HTTPException
+
+async def send_shift_information_to_coordinator(sender: str, shift_info: dict):
+    try:
+        print("SHIFT INFO:", shift_info)
+        base_query = "SELECT * FROM shift_tracker WHERE"
+        conditions = []
+        values = []
+
+        # Get coordinator ID
+        coordinator_row = await db.fetchrow("""
+            SELECT id FROM coordinator WHERE coordinator_phone = $1 OR coordinator_email = $1
+""", sender)
+
+        if not coordinator_row:
+            raise HTTPException(status_code=404, detail="Coordinator not found")
+
+        coordinator_id = coordinator_row["id"]  # Extract the integer id
+
+        conditions.append("coordinator_id = ${}".format(len(values) + 1))
+        values.append(coordinator_id)
+
+        # Dynamic filters
+        if shift_info.get("date"):
+            conditions.append("date = ${}".format(len(values) + 1))
+            values.append(shift_info["date"])
+        elif shift_info.get("start_date") and shift_info.get("end_date"):
+            conditions.append("date BETWEEN ${} AND ${}".format(len(values) + 1, len(values) + 2))
+            values.append(shift_info["start_date"])
+            values.append(shift_info["end_date"])
+
+        if shift_info.get("shift"):
+            conditions.append("shift = ${}".format(len(values) + 1))
+            values.append(shift_info["shift"])
+
+        if shift_info.get("nurse_type"):
+            conditions.append("nurse_type = ${}".format(len(values) + 1))
+            values.append(shift_info["nurse_type"])
+
+        if shift_info.get("status"):
+            conditions.append("status = ${}".format(len(values) + 1))
+            values.append(shift_info["status"])
+
+        # Final query
+        final_query = base_query + " " + " AND ".join(conditions)
+        shift_records = await db.fetch(final_query, *values)
+        print("Shift Records:", shift_records)
+    # Format and send message
+        if shift_records:
+            shift_lines = []
+            for shift in shift_records:
+                date = normalize_date(shift['date'])
+                date = convert_to_md(date)
+                shift_lines.append(
+                    f"- Date: {date}, Shift: {shift['shift']}, Nurse Type: {shift['nurse_type']}, Status: {shift['status']}"
+                )
+            shift_message = "Here are the shifts that match your criteria:\n" + "\n".join(shift_lines)
+        else:
+            shift_message = "No shifts found for the given criteria."
+
+        # Send message asynchronously
+        asyncio.create_task(send_message(sender, shift_message))
+        await update_coordinator_chat_history(sender, shift_message, "sent")
+    except Exception as e:
+        print("Error in send_shift_information_to_coordinator:", e)
+        raise HTTPException(status_code=500, detail="An error has occurred while processing your request.")
+
+
 async def coordinator_chat_bot(sender,text):
     from app.helper.promptHelper import generateReplyFromAI
     from app.controller.nurseController import search_nurses, send_nurses_message
@@ -393,7 +463,7 @@ async def coordinator_chat_bot(sender,text):
 
                 nurse_exists = await check_nurse_type(sender, nurse_type)
                 if not nurse_exists:
-                    asyncio.create_task(send_message(sender, "The nurse type you requested is not linked with your account. Please chec and try again."))
+                    asyncio.create_task(send_message(sender, "The nurse type you requested is not linked with your account. Please check and try again."))
                     return {"message": response_text}
 
                 shift_id = await create_shift(sender, nurse_type, shift, date, additional_instructions)
@@ -422,6 +492,8 @@ async def coordinator_chat_bot(sender,text):
                 if isinstance(reply_message["shift_id"], list)
                 else [reply_message["shift_id"]]
             )
+            deleted_shift_ids = []
+
             for shift_id in shift_ids:
                 is_valid = await validate_shift_before_cancellation(shift_id, sender)
                 if not is_valid:
@@ -429,7 +501,7 @@ async def coordinator_chat_bot(sender,text):
                 shift_details = await search_shift_by_id(shift_id)
                 if not shift_details:
                     continue
-                await delete_shift(
+                deleted = await delete_shift(
                     shift_id,
                     sender,
                     shift_details["nurse_id"],
@@ -439,10 +511,34 @@ async def coordinator_chat_bot(sender,text):
                     shift_details["date"],
                     shift_details["facility_name"]
                 )
+                if deleted:
+                    deleted_shift_ids.append(str(shift_id))
+
+            # After loop, send summary message if any shifts were deleted
+            if deleted_shift_ids:
+                if len(deleted_shift_ids) == 1:
+                    msg = f"The shift with ID {deleted_shift_ids[0]} has been deleted."
+                else:
+                    msg = f"The shifts with IDs {', '.join(deleted_shift_ids)} have been deleted."
+                asyncio.create_task(send_message(sender, msg))
 
         if reply_message.get("follow_up") and reply_message.get("nurse_name"):
             await follow_up_message_send(sender, reply_message["nurse_name"], reply_message["follow_up_message"])
+        if reply_message.get("shift_information"):
+            result = {}
+            shift_info = reply_message["shift_information"]
 
+            result["shift"] = shift_info.get("shift")
+            result["nurse_type"] = shift_info.get("nurse_type")
+            result["status"] = shift_info.get("status")
+
+            if shift_info.get("date"):
+                if reply_message.get("get_shift_information", {}).get("date"):
+                    result["date"] = shift_info["date"]
+            elif shift_info.get("start_date") and shift_info.get("end_date"):
+                result["start_date"] = shift_info["start_date"]
+                result["end_date"] = shift_info["end_date"]
+            await send_shift_information_to_coordinator(sender, result)
         await update_coordinator_chat_history(sender, response_text, "sent")
 
         return {"message": response_text}
