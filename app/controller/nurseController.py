@@ -16,6 +16,10 @@ from fastapi import Request, Response, HTTPException
 import logging
 from app.utils.serialize_row import serialize_row
 from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
+import traceback
+from datetime import datetime
+from dateutil import parser as date_parser
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -378,7 +382,7 @@ async def admin_edit_nurse(request: Request, response: Response, id: int):
                 email = $7, talent_id = $8, nurse_type = $9, mobile_number = $10, location = $11, shift = $12
             WHERE id = $13
         """, data["firstName"], data["lastName"], data["scheduleName"], data["rate"], data["shiftDif"], data["otRate"],
-             email, data["talentId"], data["position"], phone, data["location"], data["shift"], id)
+             email, str(data["talentId"]), data["position"], phone, data["location"], data["shift"], id)
 
         return JSONResponse(content={"message": "Nurse updated successfully", "status": 200}, status_code=200)
 
@@ -588,6 +592,44 @@ async def admin_delete_service(request: Request, response: Response, id: int, ro
             status_code=500
         )
     
+shift_index_storage = {}
+
+async def save_shift_index_map(sender: str, shift_index_map: dict):
+    """Save the shift index map for a given sender."""
+    shift_index_storage[sender] = shift_index_map
+
+async def get_shift_index_map(sender: str) -> dict:
+    """Retrieve the shift index map for a given sender."""
+    return shift_index_storage.get(sender, {})
+
+# def parse_dates_from_text(text: str) -> list:
+#     """
+#     Extracts valid date strings from the nurse's input using fuzzy matching.
+#     Returns a list of strings in 'YYYY-MM-DD' format.
+#     """
+#     words = re.split(r"[.,;:\s]+", text)
+#     potential_dates = []
+
+#     for i in range(len(words)):
+#         chunk = " ".join(words[i:i+3])  # check trigrams like "10 July", "7/10", etc.
+#         parsed = dateparser.parse(chunk, settings={"PREFER_DATES_FROM": "future"})
+#         if parsed:
+#             potential_dates.append(parsed.strftime("%Y-%m-%d"))
+
+#     return list(set(potential_dates))  # remove duplicates
+def parse_dates_from_text(text: str, current_year: int = datetime.now().year):
+    # Match common date formats: 7/12, 12-07, July 13, etc.
+    date_patterns = re.findall(r'(?:(?:\d{1,2}[/-]\d{1,2})|(?:\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}))', text, re.IGNORECASE)
+    parsed_dates = []
+    for date_str in date_patterns:
+        try:
+            # If input is like 7/13, assume year = current year
+            parsed = date_parser.parse(date_str, default=datetime(current_year, 1, 1))
+            parsed_dates.append(parsed.strftime('%Y-%m-%d'))
+        except Exception as e:
+            print(f"Failed to parse: {date_str} -> {e}")
+    return parsed_dates
+    
 async def nurse_chat_bot(sender, text):
     from app.controller.shiftController import (
     check_shift_status, shift_cancellation_nurse, check_shift_validity,
@@ -595,7 +637,7 @@ async def nurse_chat_bot(sender, text):
     )
     from app.controller.coordinatorController import (
     update_coordinator_chat_history, update_coordinator)
-
+    confirmed_dates = []
     try:
         await update_nurse_chat_history(sender, text, "received")
     except Exception as e:
@@ -604,7 +646,6 @@ async def nurse_chat_bot(sender, text):
     try:
         past_messages = await get_nurse_chat_data(sender)
         reply_message = await generateReplyFromAINurse(text, past_messages)
-        print("AI Reply:", reply_message)
         if isinstance(reply_message, str):
             reply_message = reply_message.strip()
             if reply_message.startswith("```json"):
@@ -619,37 +660,63 @@ async def nurse_chat_bot(sender, text):
                 raise HTTPException(status_code=500, detail="Invalid AI response format.")
 
         await update_nurse_chat_history(sender, reply_message["message"], "sent")
-        print("replyMessage:", reply_message)
+        print("replyMessage for nurse:", reply_message)
 
         # Helper function to format date
         def format_date(date_str: str) -> str:
             dt = datetime.strptime(normalize_date(date_str), "%Y-%m-%d")
             return convert_to_md(dt)
+        def sanitize_facility_name(name: str) -> str:
+            return name.strip().lower()
 
         # Confirmation section (get shifts by facility, check validity, status, etc.)
         if reply_message.get("confirmation"):
-            facility_names = reply_message["facility_name"]
+            # facility_names = reply_message["facility_name"]
+            # facility_names = facility_names if isinstance(facility_names, list) else [facility_names]
+            # facility_names = [sanitize_facility_name(name) for name in facility_names]
+            facility_names = reply_message.get("facility_name")
+            # If facility_name is not provided directly, extract from confirmed_dates
+            if not facility_names and "confirmed_dates" in reply_message:
+                facility_names = list(reply_message["confirmed_dates"].keys())
+            # Normalize to list and sanitize
             facility_names = facility_names if isinstance(facility_names, list) else [facility_names]
-            print("sender:", sender)
-            print('length',len(sender))
+            facility_names = [sanitize_facility_name(name) for name in facility_names]
             nurse_info = await get_nurse_info(sender)
-            print("Nurse Info:", nurse_info)
             nurse_type = nurse_info["nurse_type"]
             shift = nurse_info["shift"]
-            print("Nurse Type:", nurse_type)
-            print("Shift:", shift)
             for facility_name in facility_names:
-                print("Facility Name:", facility_name)
+                print(facility_name, "facility_name hey")
                 shift_ids = await get_shift_id_by_name(facility_name, nurse_type, shift, sender)
-                print("shiftID:", shift_ids)
 
                 if isinstance(shift_ids, list):
                     details_array = await asyncio.gather(*[search_shift_by_id(id) for id in shift_ids])
-                    shift_dates = [
-                        format_date(detail["date"]) for detail in details_array if detail and detail.get("date")
-                    ]
-                    message = f"We found multiple shifts at {facility_name} that match your profile. On which date would you like to cover the shift?\n\n{', '.join(shift_dates)}"
-                    asyncio.create_task(send_message(sender, message)) 
+                    # shift_dates = [
+                    #     format_date(detail["date"]) for detail in details_array if detail and detail.get("date")
+                    # ]
+                    # print("Shift Dates:", shift_dates)
+                    # message = f"We found multiple shifts at {facility_name} that match your profile. On which date would you like to cover the shift?\n\n{', '.join(shift_dates)}"
+                    # asyncio.create_task(send_message(sender, message)) 
+                    formatted_items = []
+                    shift_index_map = {}
+                    for idx, detail in enumerate(details_array, start=1):
+                        if detail and detail.get("date"):
+                            formatted_date = format_date(detail["date"])
+                            formatted_items.append(f"{idx}. Date: {formatted_date}, Facility: \"{facility_name}\"")
+                            shift_index_map[str(idx)] = {
+                                        "date": detail["date"].strftime("%Y-%m-%d"),
+                                        "facility": facility_name
+                                    }
+                    if formatted_items:
+                        msg_lines = [
+                            f"We found multiple shifts at {facility_name} that match your profile.",
+                            "On which date would you like to cover the shift?\n",
+                            *formatted_items,
+                            "\nPlease reply with the index of the shift to confirm the booking."
+                        ]
+                        message = "\n".join(msg_lines)
+
+                    await save_shift_index_map(sender, shift_index_map)
+                    asyncio.create_task(send_message(sender, message))
                 elif shift_ids:
                     valid_shift = await check_shift_validity(shift_ids, sender)
                     if not valid_shift:
@@ -662,35 +729,112 @@ async def nurse_chat_bot(sender, text):
                 else:
                     print("No shift found")
 
-        # Booking shift by dates and facilities
-        if reply_message.get("shift"):
+        # Selection by index
+        if reply_message.get("index_selection"):
+            index_selection = reply_message["index_selection"]
+            shift_index_map = await get_shift_index_map(sender)
             nurse_info = await get_nurse_info(sender)
-            print("Nurse Info:", nurse_info)
             nurse_type = nurse_info["nurse_type"]
             shift = nurse_info["shift"]
-            print("Nurse Type:", nurse_type)
-            print("Shift:", shift)
-            for facility_name, dates in reply_message["shift"].items():
-                print("Facility Name:", facility_name)
-                print("Dates:", dates)
-                date_list = dates if isinstance(dates, list) else [dates]
-                for date in date_list:
+
+            for index in index_selection:
+                index = str(index)
+                if index in shift_index_map:
+                    facility_name = sanitize_facility_name(shift_index_map[index]["facility"])
+                    date = shift_index_map[index]["date"]
                     shift_id = await search_by_date(date, facility_name, nurse_type, shift)
-                    print("Shift ID:", shift_id)
                     formatted_date = format_date(date)
                     if not shift_id:
-                        asyncio.create_task(send_message(sender, f"No shift found for {formatted_date} at {facility_name} for {nurse_type} {shift} shift")) 
+                        asyncio.create_task(send_message(sender, f"No shift found for {formatted_date} at {facility_name} for {nurse_type} {shift} shift"))
                         continue
-                    print('checking shift validity')
                     valid_shift = await check_shift_validity(shift_id, sender)
-                    print("Valid Shift:", valid_shift)
                     if not valid_shift:
                         continue
                     status = await check_shift_status(shift_id, sender)
                     if status == "filled":
-                        asyncio.create_task(send_message(sender, "Sorry, the shift has already been filled. We will update you when more shifts are available for you.")) 
+                        asyncio.create_task(send_message(sender, "Sorry, the shift has already been filled. We will update you when more shifts are available for you."))
                         continue
                     await update_coordinator(shift_id, sender)
+                    confirmed_dates.append(formatted_date)
+            #  🔁 Update the reply message dynamically with dates
+            if confirmed_dates:
+                if len(confirmed_dates) == 1:
+                    reply_message["message"] = f"Thanks! I've marked you for the selected shift on {confirmed_dates[0]}."
+                else:
+                    dates_str = ", ".join(confirmed_dates)
+                    reply_message["message"] = f"Thanks! I've marked you for the selected shifts on {dates_str}."
+
+        # Direct confirmation using detected dates and known nurse type/shift
+        if not reply_message.get("index_selection") and not reply_message.get("confirmed_dates"):
+            parsed_dates = parse_dates_from_text(text)
+            if parsed_dates:
+                nurse_info = await get_nurse_info(sender)
+                nurse_type = nurse_info["nurse_type"]
+                shift = nurse_info["shift"]
+                facility_names = reply_message["facility_name"]
+                facility_names = facility_names if isinstance(facility_names, list) else [facility_names]
+                facility_names = [sanitize_facility_name(name) for name in facility_names]
+
+                for date in parsed_dates:
+                    for facility_name in facility_names:
+                        shift_id = await search_by_date(date, facility_name, nurse_type, shift)
+                        # formatted_date = format_date(date)
+                        formatted_date = convert_to_md(date)
+                        if not shift_id:
+                            asyncio.create_task(send_message(sender, f"No shift found for {formatted_date} at {facility_name} for {nurse_type} {shift} shift"))
+                            continue
+
+                        valid_shift = await check_shift_validity(shift_id, sender)
+                        if not valid_shift:
+                            continue
+
+                        status = await check_shift_status(shift_id, sender)
+                        if status == "filled":
+                            asyncio.create_task(send_message(sender, f"Sorry, the shift on {formatted_date} has already been filled."))
+                            continue
+
+                        await update_coordinator(shift_id, sender)
+                        confirmed_dates.append(formatted_date)
+
+                if confirmed_dates:
+                    if len(confirmed_dates) == 1:
+                        reply_message["message"] = f"Thanks! I've marked you for the selected shift on {confirmed_dates[0]}."
+                    else:
+                        reply_message["message"] = f"Thanks! I've marked you for the selected shifts on {', '.join(confirmed_dates)}."
+
+        # Confirmation by specific date(s)
+        # if reply_message.get("confirmed_dates"):
+        #     nurse_info = await get_nurse_info(sender)
+        #     nurse_type = nurse_info["nurse_type"]
+        #     shift = nurse_info["shift"]
+        #     print("Confirmed by date:", reply_message["confirmed_dates"])
+        #     for facility_name, dates in reply_message["confirmed_dates"].items():
+        #         facility_name = sanitize_facility_name(facility_name)
+        #         date_list = dates if isinstance(dates, list) else [dates]
+        #         print("Dates:", date_list)
+        #         for date in date_list:
+        #             shift_id = await search_by_date(date, facility_name, nurse_type, shift)
+        #             print("Shift ID checking by date:", shift_id)
+        #             formatted_date = format_date(date)
+        #             if not shift_id:
+        #                 asyncio.create_task(send_message(sender, f"No shift found for {formatted_date} at {facility_name} for {nurse_type} {shift} shift"))
+        #                 continue
+                
+        #             valid_shift = await check_shift_validity(shift_id, sender)
+        #             if not valid_shift:
+        #                 continue
+        #             status = await check_shift_status(shift_id, sender)
+        #             if status == "filled":
+        #                 asyncio.create_task(send_message(sender, "Sorry, the shift has already been filled. We will update you when more shifts are available for you.")) 
+        #                 continue
+        #             await update_coordinator(shift_id, sender)
+        #             confirmed_dates.append(formatted_date)
+        #     if confirmed_dates:
+        #         if len(confirmed_dates) == 1:
+        #             reply_message["message"] = f"Thanks! I've marked you for the selected shift on {confirmed_dates[0]}."
+        #         else:
+        #             dates_str = ", ".join(confirmed_dates)
+        #             reply_message["message"] = f"Thanks! I've marked you for the selected shifts on {dates_str}."
 
         # Cancellation
         if reply_message.get("shift_details") and reply_message.get("cancellation"):
@@ -717,4 +861,5 @@ async def nurse_chat_bot(sender, text):
 
     except Exception as e:
         print("Error generating response:", e)
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail="Sorry, something went wrong.")

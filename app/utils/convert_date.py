@@ -1,4 +1,5 @@
 from datetime import datetime, date
+import dateparser
 
 def normalize_to_date(value):
     if isinstance(value, date) and not isinstance(value, datetime):
@@ -11,3 +12,10 @@ def normalize_to_date(value):
         except ValueError:
             raise ValueError(f"Invalid date string format: {value}. Expected 'YYYY-MM-DD'.")
     raise TypeError(f"Unsupported date type: {type(value)}")
+
+
+def extract_date_from_text(text: str) -> str | None:
+    dt = dateparser.parse(text)
+    if dt:
+        return dt.strftime('%Y-%m-%d')
+    return None

@@ -1,5 +1,6 @@
 from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, Numeric, Time, Date, TIMESTAMP
 from app.database import Base
+from sqlalchemy.dialects.postgresql import JSONB  
 
 class Admin(Base):
     __tablename__ = "admin"
@@ -25,6 +26,7 @@ class Coordinator(Base):
     coordinator_last_name = Column(Text, nullable=False)
     coordinator_phone = Column(Text, unique=True, nullable=False)
     coordinator_email = Column(Text, unique=True, nullable=False)
+    last_created_shift = Column(JSONB, nullable=True)
 
 class CoordinatorChatData(Base):
     __tablename__ = "coordinator_chat_data"

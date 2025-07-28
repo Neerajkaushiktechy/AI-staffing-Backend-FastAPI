@@ -3,7 +3,7 @@ from fastapi import Request, HTTPException
 from jose import jwt, JWTError
 import os
 
-JWT_SECRET = os.getenv("JWT_SECRET")
+JWT_SECRET = os.getenv("JWT_SECRET") or "default_secret"
 ALGORITHM = "HS256"
 
 def get_current_user(request: Request):

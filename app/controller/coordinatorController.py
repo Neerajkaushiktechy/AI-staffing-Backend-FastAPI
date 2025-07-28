@@ -1,3 +1,5 @@
+import re
+from app.utils.cache import cache
 from app.database import db
 from app.utils.send_message import send_message
 from dotenv import load_dotenv
@@ -13,6 +15,7 @@ from fastapi.responses import JSONResponse
 from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
 from datetime import datetime
 from app.utils.convert_date import extract_date_from_text
+from datetime import datetime, timedelta
 
 async def update_coordinator(shift_id: int, nurse_phone_number: str):
     try:
@@ -23,22 +26,15 @@ async def update_coordinator(shift_id: int, nurse_phone_number: str):
             return
 
         await update_shift_status(shift_id, nurse.get("id"))
-        print('shift status updated')
         recipient = await get_coordinator_number(shift_id)
         shift_info = await get_shift_information(shift_id)
-        print("recipient:", recipient)
-        print("shift_info:", shift_info)
         if nurse and shift_info:
-            print("Nurse and shift information found. Preparing to send message.")
             formatted_date = normalize_date(shift_info["date"])
-            print("Formatted date:", formatted_date)
             date_obj = formatted_date if isinstance(formatted_date, str) else str(formatted_date)
             date_obj = date_obj.split("T")[0]  # assumes ISO format
-            print("Date object:", date_obj)
             y, m, d = date_obj.split("-")
             final_date = f"{m.zfill(2)}-{d.zfill(2)}-{y}"
             final_date = convert_to_md(final_date)
-            print("Final date:", final_date)
             message = (
                 f"Hello! Your shift requested on {final_date} "
                 f"for {nurse['nurse_type']} {shift_info['shift']} shift has been filled. "
@@ -302,7 +298,7 @@ async def follow_up_message_send(sender: str, nurse_name_input: str, follow_up_m
 
             try:
                 reply_message = await generate_follow_up_message_for_nurse(full_name, follow_up_message, facility_name)
-                print("follow uo message", reply_message)
+                print("follow up message", reply_message)
                 if isinstance(reply_message, str):
                     reply_message = reply_message.strip()
                     if reply_message.startswith("```json") or reply_message.startswith("```"):
@@ -403,7 +399,6 @@ async def send_shift_information_to_coordinator(sender: str, shift_info: dict):
         # Final query
         final_query = base_query + " " + " AND ".join(conditions)
         shift_records = await db.fetch(final_query, *values)
-        print("Shift Records:", shift_records)
     # Format and send message
         if shift_records:
             shift_lines = []
@@ -429,10 +424,53 @@ async def coordinator_chat_bot(sender,text):
     from app.helper.promptHelper import generateReplyFromAI
     from app.controller.nurseController import search_nurses, send_nurses_message
     from app.controller.shiftController import create_shift, search_shift, search_shift_by_id, delete_shift, search_shifts_in_db
+    from app.controller.instructionController import handle_instruction_update_request, handle_index_reply_for_instruction, handle_instruction_text_reply, handle_shift_field_update_text  # ✅ imported new functions
+    from app.controller.shiftDeletionHandler import (
+    handle_index_reply_for_shift_deletion,
+    handle_shift_delete_request,
+    handle_delete_all_shifts,
+    handle_deletion_confirmation,
+    )
     await update_coordinator_chat_history(sender, text, "received")
     past_messages = await get_coordinator_chat_data(sender)
+
+    # First: Handle final confirmation of deletion (yes/no)
+    response_from_confirmation = await handle_deletion_confirmation(sender, text, db, cache)
+    if response_from_confirmation:
+        return response_from_confirmation
+
+    # Second: Handle shift deletion by index
+    response_from_index_delete = await handle_index_reply_for_shift_deletion(sender, text, db, cache)
+    if response_from_index_delete:
+        return response_from_index_delete
+
+    # Third: Handle instruction update by index
+    response_from_index = await handle_index_reply_for_instruction(sender, text, db, cache)
+    if response_from_index:
+        return response_from_index
+
+    #  Fourth: Handle case where user is replying with update info (e.g., "Change to RN AM on 7/1")
+    response_from_field_update = await handle_shift_field_update_text(sender, text, db, cache)
+    if response_from_field_update:
+        return response_from_field_update
+
+    # Fifth: Handle case where user is replying with simple instruction text (fallback)
+    response_from_instruction_text = await handle_instruction_text_reply(sender, text, db, cache)
+    if response_from_instruction_text:
+        return response_from_instruction_text
+    
+    # Eight: Handle shift deletion by index
+    response_from_index_delete = await handle_index_reply_for_shift_deletion(sender, text, db, cache)
+    if response_from_index_delete:
+        return response_from_index_delete
+    
+    # Optional: Clear instruction context if delete intent detected
+    if any(word in text.lower() for word in ["delete", "remove", "cancel", "delte"]):
+        await cache.delete(sender + "_pending_instruction")
+
     try:
         reply_message = await generateReplyFromAI(text, past_messages)
+        print("AI Reply:", reply_message)
         if isinstance(reply_message, str):
             reply_message = reply_message.strip()
             if reply_message.startswith("```json"):
@@ -444,10 +482,51 @@ async def coordinator_chat_bot(sender,text):
                 reply_message = json.loads(reply_message)
             except json.JSONDecodeError:
                 raise HTTPException(status_code=500, detail="Invalid AI response format.")
-        print("Parsed AI Reply:", reply_message)
-        response_text = reply_message.get("message", "")
         
-        # ✅ Handle nurse_details (shift creation or instruction-only update)
+        # ✅ Handle AI sample prompt block for instruction update
+        if reply_message.get("instruction_update_request") is None and "Which of these shifts" in reply_message.get("message", ""):
+            return await handle_instruction_update_request(sender, {"instruction": text}, db, cache)
+    
+        # Handle delete_all request
+        if reply_message.get("delete_all"):
+            return await handle_delete_all_shifts(sender, db)
+
+        #  Handle AI-detected shift delete request by nurse_type, shift, date
+        if "shift_delete_request" in reply_message:
+            req = reply_message["shift_delete_request"]
+
+            if not req["nurse_type"] or not req["shift"]:  # Missing info
+                # If only date is provided, show all shifts on that date
+                matching_shifts = await search_shifts_in_db(
+                    date=req["date"], sender_phone=sender
+                )
+                if not matching_shifts:
+                    return {"message": f"No shifts found on {convert_to_md(req['date'])}."}
+
+                await cache.set(sender + "_awaiting_shift_delete", json.dumps({
+                    "shifts": matching_shifts
+                }))
+
+                response_lines = ["Here are the shifts that match your criteria:"]
+                for idx, s in enumerate(matching_shifts):
+                    response_lines.append(
+                        f"{idx}. Date: {convert_to_md(s['date'])}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, Status: {s['status']}"
+                    )
+
+                return {
+                    "message": "\n".join(response_lines) + "\nPlease reply with the index of the shift you'd like to delete"
+                }
+
+            else:
+                # Proceed with normal delete logic (nurse_type + shift known)
+                return await handle_shift_delete_request(reply_message, sender, db, cache)
+        response_text = reply_message.get("message", "")
+
+        #  Handle instruction update request with possible multiple matches
+        if reply_message.get("instruction_update_request"):
+            return await handle_instruction_update_request(sender, reply_message["instruction_update_request"], db, cache)
+
+        #  Handle nurse_details (shift creation or instruction-only update)
         if reply_message.get("nurse_details"):
             nurse_details_list = (
                 reply_message["nurse_details"]
@@ -463,26 +542,44 @@ async def coordinator_chat_bot(sender,text):
                 date = nurse_detail["date"]
                 additional_instructions = nurse_detail.get("additional_instructions", "")
 
-                # ✅ Check if nurse type is linked
                 nurse_exists = await check_nurse_type(sender, nurse_type)
                 if not nurse_exists:
-                    response_text = f"❌ The service type '{nurse_type}' is not available for your facility. Please choose a different service type."
+                    response_text = f"The nurse type '{nurse_type}' is not available for your facility. Please choose a different nurse type."
                     await update_coordinator_chat_history(sender, response_text, "sent")
                     return {"message": response_text}
+                
+                if reply_message.get("intent") == "create_shift":
+                    pass
 
-               # ✅ Only update existing shift if a specific shift ID or update instruction is given
-# (You can later enhance this to rely on `instruction_update_target` from the AI)
+                if not reply_message.get("instruction_update_target") and additional_instructions:
+                    last = await db.fetchval(
+                        "SELECT last_created_shift FROM coordinator WHERE coordinator_phone = $1 OR coordinator_email = $1",
+                        sender
+                    )
+                    if last:
+                        last_shift = json.loads(last)
+                        shift_id = last_shift.get("shift_id")
+                        nurse_type = last_shift.get("nurse_type")
+                        date = last_shift.get("date")
+                        shift = last_shift.get("shift")
+                        if shift_id:
+                            await db.execute(
+                                "UPDATE shift_tracker SET additional_instructions = $1 WHERE id = $2",
+                                additional_instructions,
+                                shift_id
+                            )
+                            msg = f"✅ Instruction added to shift{date, nurse_type, shift} thanks\""
+                            await update_coordinator_chat_history(sender, msg, "sent")
+                            return {"message": msg}
+
                 if reply_message.get("instruction_update_target"):
                     target = reply_message["instruction_update_target"]
                     shift_id = target.get("id")
                     additional_instructions = target.get("additional_instructions")
-                    
+
                     if shift_id and additional_instructions:
                         await db.execute(
-                            """
-                            UPDATE shift SET additional_instructions = $1
-                            WHERE id = $2
-                            """,
+                            "UPDATE shift_tracker SET additional_instructions = $1 WHERE id = $2",
                             additional_instructions,
                             shift_id
                         )
@@ -501,16 +598,44 @@ async def coordinator_chat_bot(sender,text):
                     msg = f"⚠️ Oops! {formatted_date} has already passed. Please provide a future date for the shift."
                     return {"message": msg}
 
+                if not shift:
+                    return {"message": "Please specify a valid shift (AM, PM, or NOC) to proceed with booking."}
                 # Step 2: If Today, Check Shift Start Time
                 if shift_date == today:
-                    shift_time_fields = {
-                        "AM": "am_time_start",
-                        "PM": "pm_time_start",
-                        "NOC": "noc_time_start"
-                    }
-                    shift_start_field = shift_time_fields.get(shift.upper())
+                    # shift_time_fields = {
+                    #     "AM": "am_time_start",
+                    #     "PM": "pm_time_start",
+                    #     "NOC": "noc_time_start"
+                    # }
+                    # shift_start_field = shift_time_fields.get(shift.upper())
 
-                    if shift_start_field:
+                    # if shift_start_field:
+                    #     coordinator = await db.fetchrow(
+                    #         "SELECT facility_id FROM coordinator WHERE coordinator_phone = $1 OR coordinator_email = $1",
+                    #         sender
+                    #     )
+                    #     if coordinator:
+                    #         facility_id = coordinator["facility_id"]
+                    #         time_row = await db.fetchrow(
+                    #             f"SELECT {shift_start_field} FROM shifts WHERE facility_id = $1 AND role = $2",
+                    #             facility_id, nurse_type
+                    #         )
+                    #         if time_row and time_row[shift_start_field]:
+                    #             shift_start_time = time_row[shift_start_field]
+
+                    #             if now >= shift_start_time:
+                    #                 msg = f"⚠️ Booking not allowed. The {shift.upper()} shift for {nurse_type} has already started at {shift_start_time.strftime('%I:%M %p')}."
+                    #                 return {"message": msg}
+                    now = datetime.now()
+                    shift_time_fields = {
+                        "AM": ("am_time_start", "am_time_end"),
+                        "PM": ("pm_time_start", "pm_time_end"),
+                        "NOC": ("noc_time_start", "noc_time_end")
+                    }
+                    time_fields = shift_time_fields.get(shift.upper())
+
+                    if time_fields:
+                        shift_start_field, shift_end_field = time_fields
                         coordinator = await db.fetchrow(
                             "SELECT facility_id FROM coordinator WHERE coordinator_phone = $1 OR coordinator_email = $1",
                             sender
@@ -518,14 +643,33 @@ async def coordinator_chat_bot(sender,text):
                         if coordinator:
                             facility_id = coordinator["facility_id"]
                             time_row = await db.fetchrow(
-                                f"SELECT {shift_start_field} FROM shifts WHERE facility_id = $1 AND role = $2",
+                                f"SELECT {shift_start_field}, {shift_end_field} FROM shifts WHERE facility_id = $1 AND role = $2",
                                 facility_id, nurse_type
                             )
-                            if time_row and time_row[shift_start_field]:
+                            if time_row and time_row[shift_start_field] and time_row[shift_end_field]:
+                                # Extract start and end time (these are `datetime.time` objects)
                                 shift_start_time = time_row[shift_start_field]
+                                shift_end_time = time_row[shift_end_field]
 
-                                if now >= shift_start_time:
-                                    msg = f"⚠️ Booking not allowed. The {shift.upper()} shift for {nurse_type} has already started at {shift_start_time.strftime('%I:%M %p')}."
+                                # Convert to datetime.datetime
+                                shift_start_dt = datetime.combine(now.date(), shift_start_time)
+                                shift_end_dt = datetime.combine(now.date(), shift_end_time)
+
+                                # If end time is past midnight
+                                if shift_end_dt <= shift_start_dt:
+                                    shift_end_dt += timedelta(days=1)
+
+                                shift_duration = shift_end_dt - shift_start_dt
+                                half_duration = shift_duration / 2
+                                cutoff_time = shift_start_dt + half_duration
+
+                                # ⛔ Booking not allowed at or after cutoff
+                                if now >= cutoff_time:
+                                    msg = (
+                                        f"⚠️ Booking not allowed. The {shift.upper()} shift for {nurse_type} started at "
+                                        f"{shift_start_time.strftime('%I:%M %p')} and the booking cutoff was "
+                                        f"{cutoff_time.strftime('%I:%M %p')}."
+                                    )
                                     return {"message": msg}
 
                 # Step 3: Proceed with Shift Creation
@@ -536,58 +680,69 @@ async def coordinator_chat_bot(sender,text):
                     print("Shift creation failed:", error_msg)
                     return {"message": f"{error_msg}"}
 
+                await db.execute(
+                    "UPDATE coordinator SET last_created_shift = $1 WHERE coordinator_phone = $2 OR coordinator_email = $2",
+                    json.dumps({
+                        "shift_id": shift_result,
+                        "nurse_type": nurse_type,
+                        "shift": shift,
+                        "date": date
+                    }),
+                    sender
+                )
+
                 shift_id = shift_result
                 nurses = await search_nurses(nurse_type, shift, shift_id)
                 print("Nurses found:", nurses)
                 await send_nurses_message(nurses, nurse_type, shift, shift_id, date, additional_instructions)
-        if reply_message.get("shift_details") and reply_message.get("cancellation"):
-            shift_details_list = (
-                reply_message["shift_details"]
-                if isinstance(reply_message["shift_details"], list)
-                else [reply_message["shift_details"]]
-            )
-            for shift_detail in shift_details_list:
-                await search_shift(
-                    shift_detail["nurse_type"],
-                    shift_detail["shift"],
-                    shift_detail["date"],
-                    sender
-                )
+        # if reply_message.get("shift_details") and reply_message.get("cancellation"):
+        #     shift_details_list = (
+        #         reply_message["shift_details"]
+        #         if isinstance(reply_message["shift_details"], list)
+        #         else [reply_message["shift_details"]]
+        #     )
+        #     for shift_detail in shift_details_list:
+        #         await search_shift(
+        #             shift_detail["nurse_type"],
+        #             shift_detail["shift"],
+        #             shift_detail["date"],
+        #             sender
+        #         )
 
-        if reply_message.get("shift_id") and reply_message.get("cancellation"):
-            shift_ids = (
-                reply_message["shift_id"]
-                if isinstance(reply_message["shift_id"], list)
-                else [reply_message["shift_id"]]
-            )
-            deleted_shift_ids = []
+        # if reply_message.get("shift_id") and reply_message.get("cancellation"):
+        #     shift_ids = (
+        #         reply_message["shift_id"]
+        #         if isinstance(reply_message["shift_id"], list)
+        #         else [reply_message["shift_id"]]
+        #     )
+        #     deleted_shift_ids = []
 
-            for shift_id in shift_ids:
-                is_valid = await validate_shift_before_cancellation(shift_id, sender)
-                if not is_valid:
-                    continue
-                shift_details = await search_shift_by_id(shift_id)
-                if not shift_details:
-                    continue
-                deleted = await delete_shift(
-                    shift_id,
-                    sender,
-                    shift_details["nurse_id"],
-                    shift_details["nurse_type"],
-                    shift_details["shift_value"],
-                    shift_details["location"],
-                    shift_details["date"],
-                    shift_details["facility_name"]
-                )
-                if deleted:
-                    deleted_shift_ids.append(str(shift_id))
+        #     for shift_id in shift_ids:
+        #         is_valid = await validate_shift_before_cancellation(shift_id, sender)
+        #         if not is_valid:
+        #             continue
+        #         shift_details = await search_shift_by_id(shift_id)
+        #         if not shift_details:
+        #             continue
+        #         deleted = await delete_shift(
+        #             shift_id,
+        #             sender,
+        #             shift_details["nurse_id"],
+        #             shift_details["nurse_type"],
+        #             shift_details["shift_value"],
+        #             shift_details["location"],
+        #             shift_details["date"],
+        #             shift_details["facility_name"]
+        #         )
+        #         if deleted:
+        #             deleted_shift_ids.append(str(shift_id))
 
-            if deleted_shift_ids:
-                if len(deleted_shift_ids) == 1:
-                    msg = f"The shift with ID {deleted_shift_ids[0]} has been deleted."
-                else:
-                    msg = f"The shifts with IDs {', '.join(deleted_shift_ids)} have been deleted."
-                asyncio.create_task(send_message(sender, msg))
+        #     if deleted_shift_ids:
+        #         if len(deleted_shift_ids) == 1:
+        #             msg = f"The shift with ID {deleted_shift_ids[0]} has been deleted."
+        #         else:
+        #             msg = f"The shifts with IDs {', '.join(deleted_shift_ids)} have been deleted."
+        #         asyncio.create_task(send_message(sender, msg))
 
         if reply_message.get("follow_up") and reply_message.get("nurse_name"):
             await follow_up_message_send(sender, reply_message["nurse_name"], reply_message["follow_up_message"])
@@ -616,9 +771,19 @@ async def coordinator_chat_bot(sender,text):
             if actual_shifts:
               shift_list_lines = []
               for s in actual_shifts:
-                    shift_list_lines.append(
-                        f"- Date: {s['date']}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, Status: {s['status']}"
+                formatted_date = datetime.strptime(s['date'], "%Y-%m-%d").strftime("%-m/%-d")
+                if s['status'] == "filled" and s.get('nurse_name') and s.get('nurse_phone'):
+                    line = (
+                        f"- Date: {formatted_date}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, "
+                        f"Status: {s['status']}, Nurse: {s['nurse_name']} ({s['nurse_phone']})"
                     )
+                else:
+                    line = (
+                        f"- Date: {formatted_date}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, "
+                        f"Status: {s['status']}"
+                    )
+
+              shift_list_lines.append(line)
               response_text = "Here are the shifts that match your criteria:\n" + "\n".join(shift_list_lines)
             else:
               response_text = "I couldn't find any shifts matching your criteria."
@@ -628,8 +793,6 @@ async def coordinator_chat_bot(sender,text):
         else:
          # Fallback if no shift info (just use AI response message)
            response_text = reply_message.get("message", "")
-
-        
 
         return {"message": response_text}
 

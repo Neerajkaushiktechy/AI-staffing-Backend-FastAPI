@@ -9,6 +9,7 @@ from typing import Optional
 from fastapi.responses import JSONResponse
 from app.utils.serialize_row import serialize_row
 import logging
+import traceback
 load_dotenv()
 logger = logging.getLogger(__name__)
 SECRET_KEY = os.getenv("JWT_SECRET")
@@ -100,11 +101,25 @@ async def admin_add_facility(request: Request, response: Response):
 def time_str_to_ms(time_str: Optional[str]) -> int:
     if not time_str:
         return 0
-    hours, minutes = map(int, time_str.split(":"))
-    return ((hours * 60 + minutes) * 60) * 1000
+    parts = list(map(int, time_str.split(":")))
+    if len(parts) == 2:
+        hours, minutes = parts
+        seconds = 0
+    elif len(parts) == 3:
+        hours, minutes, seconds = parts
+    else:
+        raise ValueError(f"Invalid time format: {time_str}")
+    return ((hours * 60 + minutes) * 60 + seconds) * 1000
 
-def parse_time(t: Optional[str]):
-    return datetime.strptime(t, "%H:%M").time() if t else None
+def parse_time(t: Optional[str]) -> Optional[time]:
+    if not t:
+        return None
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(t, fmt).time()
+        except ValueError:
+            continue
+    raise ValueError(f"Invalid time format: {t}")
 
 async def admin_edit_facility(request: Request, response: Response, facility_id: int):
     conn = db
@@ -220,6 +235,7 @@ async def admin_edit_facility(request: Request, response: Response, facility_id:
     except Exception as e:
         await conn.execute("ROLLBACK")
         print("Edit Facility Error:", e)
+        traceback.print_exc()  
         return {"message": "Server error", "status": 500}
 
 

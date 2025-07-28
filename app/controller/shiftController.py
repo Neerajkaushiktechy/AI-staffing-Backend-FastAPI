@@ -5,7 +5,7 @@ from app.utils.send_message import send_message
 from app.utils.normalizeDate import normalize_date
 from math import radians, sin, cos, sqrt, atan2
 import asyncio
-from datetime import datetime
+from datetime import datetime,date as dt_date
 from fastapi import Request, Response, HTTPException
 from app.utils.serialize_row import serialize_row
 from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
@@ -13,12 +13,19 @@ async def create_shift(
     created_by: str,
     nurse_type: str,
     shift: str,
-    date: str,
+    shift_date_str: str,
     additional_instructions: str,
     nurse_id: int = None,
     status: str = "open"
 ):
     try:
+        # Convert and validate date
+        shift_date = datetime.strptime(shift_date_str, "%Y-%m-%d").date()
+        today = dt_date.today()
+
+        if shift_date < today:
+            raise ValueError("Oops! That date has already passed. Please provide a future date for the shift.")
+
         # Get facility and coordinator ID
         facility = await db.fetchrow("""
             SELECT facility_id, id
@@ -28,7 +35,6 @@ async def create_shift(
 
         facility_id = facility["facility_id"]
         coordinator_id = facility["id"]
-        date = datetime.strptime(date, "%Y-%m-%d").date()
         # Insert shift record
         result = await db.fetchrow("""
             INSERT INTO shift_tracker (
@@ -37,13 +43,17 @@ async def create_shift(
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING id
-        """, nurse_type, shift, nurse_id, status, date,
+        """, nurse_type, shift, nurse_id, status, shift_date,
              facility_id, coordinator_id, "bot", additional_instructions)
 
         return result["id"]
 
+    except ValueError as ve:
+        print("Validation error:", ve)
+        return {"error": str(ve)}
     except Exception as err:
         print("Error creating shift:", err)
+    return {"error": "Internal server error"}
 
 async def check_shift_status(shift_id: int, phone_number: str):
     try:
@@ -181,6 +191,104 @@ async def search_shift_by_id(shift_id: int):
         "date": shift['date'],
         "facility_name": facility['name'] if facility else ''
     }
+
+async def search_shifts_in_db(
+    date: str = None,
+    nurse_type: str = None,
+    shift: str = None,
+    status: str = None,
+    start_date: str = None,
+    end_date: str = None,
+    sender_phone: str = None,
+):
+    """
+    Returns a list of upcoming shifts matching the given filters for the facility
+    associated with sender_phone. Each dict contains:
+      - id
+      - nurse_id
+      - nurse_name
+      - nurse_phone
+      - nurse_type
+      - shift
+      - date      (YYYY-MM-DD)
+      - status
+    """
+    # Base query + join to pull nurse name
+    query = """
+    SELECT
+      s.id,
+      s.nurse_id,
+      s.nurse_type,
+      s.shift,
+      s.date,
+      s.status,
+      n.first_name AS nurse_name,
+      n.mobile_number AS nurse_phone
+
+    FROM shift_tracker s
+    LEFT JOIN nurses n ON s.nurse_id = n.id
+    WHERE 1=1
+    """
+    
+    params = []
+    idx = 1
+
+    # 1) Restrict to this coordinator's facility
+    coord = await db.fetchrow(
+        "SELECT facility_id FROM coordinator WHERE coordinator_phone = $1 OR coordinator_email = $1",
+        sender_phone
+    )
+    if coord:
+        query += f" AND s.facility_id = ${idx}"
+        params.append(coord["facility_id"])
+        idx += 1
+
+    # 2) Optional filters
+    if date:
+        dt = datetime.strptime(date, "%Y-%m-%d").date()
+        query += f" AND s.date = ${idx}"
+        params.append(dt)
+        idx += 1
+
+    if nurse_type:
+        query += f" AND s.nurse_type = ${idx}"
+        params.append(nurse_type)
+        idx += 1
+
+    if shift:
+        query += f" AND s.shift = ${idx}"
+        params.append(shift)
+        idx += 1
+
+    if status:
+        query += f" AND s.status = ${idx}"
+        params.append(status)
+        idx += 1
+
+    if start_date and end_date:
+        sd = datetime.strptime(start_date, "%Y-%m-%d").date()
+        ed = datetime.strptime(end_date,   "%Y-%m-%d").date()
+        query += f" AND s.date BETWEEN ${idx} AND ${idx+1}"
+        params.extend([sd, ed])
+        idx += 2
+
+    # Execute
+    rows = await db.fetch(query, *params)
+
+    # Build output list
+    out = []
+    for r in rows:
+        out.append({
+            "id":         r["id"],
+            "nurse_id":   r["nurse_id"],
+            "nurse_name": r["nurse_name"],
+            "nurse_phone":r["nurse_phone"],  # ✅ new field
+            "nurse_type": r["nurse_type"],
+            "shift":      r["shift"],
+            "date":       r["date"].strftime("%Y-%m-%d"),
+            "status":     r["status"],
+        })
+    return out
 
 async def shift_cancellation_nurse(nurse_type, shift, date, phone_number):
     try:
@@ -333,7 +441,7 @@ async def check_shift_validity(shift_id: int, nurse_phone_number: str) -> bool:
     if not is_available:
         asyncio.create_task(send_message(
             nurse_phone_number,
-            f"The shift you asked to cover at {facility_name} on {formatted_date} conflicts with your other shift and thus cannot be covered by you."
+            f"The shift you asked to cover at {facility_name} on {convert_to_md(formatted_date)} conflicts with your other shift and thus cannot be covered by you."
         ))
         return False
 
@@ -397,6 +505,21 @@ async def search_by_date(date: str, facility_name: str, nurse_type: str, shift: 
         return None  # No matching shift found
 
     return shift_row['id']
+
+async def get_shifts_on_date(date: str) -> str:
+    query = """
+    SELECT nurse_type, shift, status FROM shift_tracker
+    WHERE date = $1
+    ORDER BY shifts_tracker
+    """
+    rows = await db.fetch(query, date)
+    if not rows:
+        return "No shifts found for that date."
+
+    return "\n".join([
+        f"- Date: {datetime.strptime(date, '%Y-%m-%d').strftime('%-m/%-d')}, Shift: {r['shift']}, Nurse Type: {r['nurse_type']}, Status: {r['status']}"
+        for r in rows
+    ])
 
 async def admin_get_shifts(request: Request, response: Response):
     try:
@@ -511,64 +634,68 @@ async def admin_get_all_shifts(request: Request, response: Response):
         page = int(params.get("page", 1))
         limit = int(params.get("limit", 10))
         offset = (page - 1) * limit
+        status = params.get("status")
+        nurse_type = params.get("nurse_type")
+        shift_type = params.get("shift_type")
+
+        conditions = []
+        values = []
+        count_values = []
 
         if search:
             search_term = f"%{search.lower()}%"
-            query = """
-                SELECT 
-                  s.*, 
-                  CONCAT(n.first_name, ' ', n.last_name) AS nurse_name,
-                  f.name AS facility_name,
-                  CONCAT(c.coordinator_first_name, ' ', c.coordinator_last_name) AS coordinator_name
-                FROM shift_tracker s
-                LEFT JOIN nurses n ON s.nurse_id = n.id
-                LEFT JOIN facilities f ON s.facility_id = f.id
-                LEFT JOIN coordinator c ON s.coordinator_id = c.id
-                WHERE 
-                  LOWER(CONCAT(n.first_name, ' ', n.last_name)) ILIKE $1
-                  OR LOWER(f.name) ILIKE $1
-                  OR LOWER(CONCAT(c.coordinator_first_name, ' ', c.coordinator_last_name)) ILIKE $1
-                  OR LOWER(s.nurse_type) ILIKE $1
-                  OR LOWER(s.shift) ILIKE $1
-                  OR LOWER(s.status) ILIKE $1
-                ORDER BY s.id DESC
-                LIMIT $2 OFFSET $3
-            """
-            count_query = """
-                SELECT COUNT(*) AS total
-                FROM shift_tracker s
-                LEFT JOIN nurses n ON s.nurse_id = n.id
-                LEFT JOIN facilities f ON s.facility_id = f.id
-                LEFT JOIN coordinator c ON s.coordinator_id = c.id
-                WHERE 
-                  LOWER(CONCAT(n.first_name, ' ', n.last_name)) ILIKE $1
-                  OR LOWER(f.name) ILIKE $1
-                  OR LOWER(CONCAT(c.coordinator_first_name, ' ', c.coordinator_last_name)) ILIKE $1
-                  OR LOWER(s.nurse_type) ILIKE $1
-                  OR LOWER(s.shift) ILIKE $1
-                  OR LOWER(s.status) ILIKE $1
-            """
-            values = [search_term, limit, offset]
-            count_values = [search_term]
-        else:
-            query = """
-                SELECT 
-                  s.*, 
-                  CONCAT(n.first_name, ' ', n.last_name) AS nurse_name,
-                  f.name AS facility_name,
-                  CONCAT(c.coordinator_first_name, ' ', c.coordinator_last_name) AS coordinator_name
-                FROM shift_tracker s
-                LEFT JOIN nurses n ON s.nurse_id = n.id
-                LEFT JOIN facilities f ON s.facility_id = f.id
-                LEFT JOIN coordinator c ON s.coordinator_id = c.id
-                ORDER BY s.id DESC
-                LIMIT $1 OFFSET $2
-            """
-            count_query = "SELECT COUNT(*) AS total FROM shift_tracker"
-            values = [limit, offset]
-            count_values = None
+            conditions.append("""(
+                LOWER(CONCAT(n.first_name, ' ', n.last_name)) ILIKE $1 OR
+                LOWER(f.name) ILIKE $1 OR
+                LOWER(CONCAT(c.coordinator_first_name, ' ', c.coordinator_last_name)) ILIKE $1 OR
+                LOWER(s.nurse_type) ILIKE $1 OR
+                LOWER(s.shift) ILIKE $1 OR
+                LOWER(s.status) ILIKE $1
+            )""")
+            values.append(search_term)
+            count_values.append(search_term)
 
-        # Execute both queries concurrently
+        if status and status.lower() != "all":
+            conditions.append(f"s.status = ${len(values)+1}")
+            values.append(status)
+            count_values.append(status)
+
+        if nurse_type and nurse_type.lower() != "all":
+            conditions.append(f"s.nurse_type = ${len(values)+1}")
+            values.append(nurse_type)
+            count_values.append(nurse_type)
+
+        if shift_type and shift_type.lower() != "all":
+            conditions.append(f"s.shift = ${len(values)+1}")
+            values.append(shift_type)
+            count_values.append(shift_type)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        query = f"""
+            SELECT 
+              s.*, 
+              CONCAT(n.first_name, ' ', n.last_name) AS nurse_name,
+              f.name AS facility_name,
+              CONCAT(c.coordinator_first_name, ' ', c.coordinator_last_name) AS coordinator_name
+            FROM shift_tracker s
+            LEFT JOIN nurses n ON s.nurse_id = n.id
+            LEFT JOIN facilities f ON s.facility_id = f.id
+            LEFT JOIN coordinator c ON s.coordinator_id = c.id
+            {where_clause}
+            ORDER BY s.id DESC
+            LIMIT ${len(values)+1} OFFSET ${len(values)+2}
+        """
+        values.extend([limit, offset])
+
+        count_query = f"""
+            SELECT COUNT(*) AS total
+            FROM shift_tracker s
+            LEFT JOIN nurses n ON s.nurse_id = n.id
+            LEFT JOIN facilities f ON s.facility_id = f.id
+            LEFT JOIN coordinator c ON s.coordinator_id = c.id
+            {where_clause}
+        """
         result, count_result = await asyncio.gather(
             db.fetch(query, *values),
             db.fetch(count_query, *count_values) if count_values else db.fetch(count_query)
