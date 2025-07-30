@@ -17,7 +17,7 @@ import logging
 from app.utils.serialize_row import serialize_row
 from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil import parser as date_parser
 import re
 
@@ -40,24 +40,23 @@ async def search_nurses(nurse_type: str, shift: str, shift_id: int):
         if not facility or not facility["lat"] or not facility["lng"]:
             raise ValueError("Facility does not have valid coordinates.")
 
-        lat = facility["lat"]
-        lng = facility["lng"]
+        lat = float(facility["lat"])
+        lng = float(facility["lng"])
 
         # Search nurses within 50 miles radius using Haversine
         query = """
             SELECT n.*
             FROM nurses n
             WHERE n.nurse_type ILIKE $1
-              AND n.shift ILIKE $2
               AND (
                 3959 * acos(
-                  cos(radians($3)) * cos(radians(n.lat)) *
-                  cos(radians(n.lng) - radians($4)) +
-                  sin(radians($3)) * sin(radians(n.lat))
+                  cos(radians($2)) * cos(radians(n.lat)) *
+                  cos(radians(n.lng) - radians($3)) +
+                  sin(radians($2)) * sin(radians(n.lat))
                 )
               ) <= 50
         """
-        nurses = await db.fetch(query, nurse_type, shift, lat, lng)
+        nurses = await db.fetch(query, nurse_type, lat, lng)
         return nurses
 
     except Exception as e:
@@ -102,32 +101,71 @@ async def send_nurses_message(nurses, nurse_type: str, shift: str, shift_id: int
             asyncio.create_task(send_message(phone_number, ai_message)) 
 
 
-async def check_nurse_availability(nurse_id: int, shift_id: int) -> bool:
+async def check_nurse_availability(nurse_id: int, shift_id: int) -> tuple[bool, str]:
     try:
-        # Get the date of the new shift
+        # Get shift info (date and shift_value)
         new_shift = await db.fetchrow("""
-            SELECT date
+            SELECT date, shift
             FROM shift_tracker
             WHERE id = $1
         """, shift_id)
 
         if not new_shift:
-            raise ValueError(f"Shift ID {shift_id} not found.")
+            return False, "Shift not found."
 
         shift_date = new_shift["date"]
+        new_shift_value = new_shift["shift"]
 
-        # Check if nurse already has a shift on that date
+        # Get nurse type
+        nurse = await db.fetchrow("""
+            SELECT nurse_type
+            FROM nurses
+            WHERE id = $1
+        """, nurse_id)
+
+        if not nurse:
+            return False, "Nurse not found."
+
+        nurse_type = nurse["nurse_type"].strip().upper()
         existing_shifts = await db.fetch("""
-            SELECT *
-            FROM shift_tracker
-            WHERE nurse_id = $1 AND date = $2
+            SELECT st.shift, st.nurse_type, f.name AS facility_name
+            FROM shift_tracker st
+            JOIN facilities f ON st.facility_id = f.id
+            WHERE st.nurse_id = $1 AND st.date = $2
         """, nurse_id, shift_date)
 
-        return len(existing_shifts) == 0
+        # If already 2 shifts -> block
+        if len(existing_shifts) >= 2:
+                assigned = "\n".join(
+                [
+                    f"{idx + 1}. Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, Facility: {s['facility_name']}"
+                    for idx, s in enumerate(existing_shifts)
+                ]
+                )
+                msg = (
+                "You can only accept up to 2 shifts in a day.\n\n"
+                "You are already assigned the following shifts:\n"
+                f"{assigned}\n"
+            )
+                assigned = "\n".join(
+                [
+                    f"{idx + 1}. Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, Facility: {s['facility_name']}"
+                    for idx, s in enumerate(existing_shifts)
+                ]
+                )
+
+                return False, msg
+        
+        # Prevent same shift double-booking
+        assigned_shift_values = [s["shift"].strip().upper() for s in existing_shifts]
+        if new_shift_value.strip().upper() in assigned_shift_values:
+            return False, f"You already have a {new_shift_value.upper()} shift assigned on this day."
+
+        return True, "Available"
 
     except Exception as error:
         print("Error occurred while checking nurse availability:", error)
-        return False
+        return False, "An internal error occurred while checking your availability."
 
 async def update_nurse_chat_history(sender: str, text: str, msg_type: str) -> None:
     try:
@@ -629,6 +667,43 @@ def parse_dates_from_text(text: str, current_year: int = datetime.now().year):
         except Exception as e:
             print(f"Failed to parse: {date_str} -> {e}")
     return parsed_dates
+
+def is_past_halfway(start_str, end_str, shift_date_str):
+    start_time = datetime.strptime(f"{shift_date_str} {start_str}", "%Y-%m-%d %H:%M")
+    end_time = datetime.strptime(f"{shift_date_str} {end_str}", "%Y-%m-%d %H:%M")
+
+    # Handle overnight shift
+    if end_time <= start_time:
+        end_time += timedelta(days=1)
+
+    shift_mid = start_time + (end_time - start_time) / 2
+    current_time = datetime.now()
+
+    return current_time > shift_mid
+
+async def get_shift_start_end(facility_name, nurse_type, shift_type):
+    shift_time_fields = {
+        "AM": ("am_time_start", "am_time_end"),
+        "PM": ("pm_time_start", "pm_time_end"),
+        "NOC": ("noc_time_start", "noc_time_end")
+    }
+    time_fields = shift_time_fields.get(shift_type.upper())
+    if not time_fields:
+        return None, None
+
+    facility_row = await db.fetchrow("SELECT id FROM facilities WHERE name ILIKE $1", facility_name)
+    if not facility_row:
+        return None, None
+    facility_id = facility_row["id"]
+
+    shift_start_field, shift_end_field = time_fields
+    time_row = await db.fetchrow(
+        f"SELECT {shift_start_field}, {shift_end_field} FROM shifts WHERE facility_id = $1 AND role = $2",
+        facility_id, nurse_type
+    )
+    if time_row:
+        return time_row[shift_start_field], time_row[shift_end_field]
+    return None, None
     
 async def nurse_chat_bot(sender, text):
     from app.controller.shiftController import (
@@ -646,6 +721,7 @@ async def nurse_chat_bot(sender, text):
     try:
         past_messages = await get_nurse_chat_data(sender)
         reply_message = await generateReplyFromAINurse(text, past_messages)
+        print("Generated reply message:", reply_message)
         if isinstance(reply_message, str):
             reply_message = reply_message.strip()
             if reply_message.startswith("```json"):
@@ -685,33 +761,34 @@ async def nurse_chat_bot(sender, text):
             nurse_type = nurse_info["nurse_type"]
             shift = nurse_info["shift"]
             for facility_name in facility_names:
-                print(facility_name, "facility_name hey")
-                shift_ids = await get_shift_id_by_name(facility_name, nurse_type, shift, sender)
+            # ✅ Get all shift IDs for the facility and nurse type (ignore shift_value)
+                shift_ids = await get_shift_id_by_name(facility_name, nurse_type, None, sender)  # shift=None
 
-                if isinstance(shift_ids, list):
+                if isinstance(shift_ids, list) and shift_ids:
                     details_array = await asyncio.gather(*[search_shift_by_id(id) for id in shift_ids])
-                    # shift_dates = [
-                    #     format_date(detail["date"]) for detail in details_array if detail and detail.get("date")
-                    # ]
-                    # print("Shift Dates:", shift_dates)
-                    # message = f"We found multiple shifts at {facility_name} that match your profile. On which date would you like to cover the shift?\n\n{', '.join(shift_dates)}"
-                    # asyncio.create_task(send_message(sender, message)) 
                     formatted_items = []
                     shift_index_map = {}
                     for idx, detail in enumerate(details_array, start=1):
                         if detail and detail.get("date"):
                             formatted_date = format_date(detail["date"])
-                            formatted_items.append(f"{idx}. Date: {formatted_date}, Facility: \"{facility_name}\"")
+                            shift_val = detail["shift_value"]
+                            nurse_t = detail.get("nurse_type", nurse_type)
+
+                            formatted_items.append(
+                                f"{idx}. Date: {formatted_date}, Shift: {shift_val}, Nurse Type: {nurse_t}, Facility: \"{facility_name}\""
+                            )
                             shift_index_map[str(idx)] = {
-                                        "date": detail["date"].strftime("%Y-%m-%d"),
-                                        "facility": facility_name
-                                    }
+                                "date": detail["date"].strftime("%Y-%m-%d"),
+                                "facility": facility_name,
+                                "shift_value": shift_val,
+                                "nurse_type": nurse_t
+                            }
                     if formatted_items:
                         msg_lines = [
-                            f"We found multiple shifts at {facility_name} that match your profile.",
-                            "On which date would you like to cover the shift?\n",
+                            f"We found multiple shifts at {facility_name} that match your nurse type ({nurse_type}).",
+                            "Please choose one of the shifts below to confirm:",
                             *formatted_items,
-                            "\nPlease reply with the index of the shift to confirm the booking."
+                            "\nReply with the index of the shift you'd like to book."
                         ]
                         message = "\n".join(msg_lines)
 
@@ -725,7 +802,21 @@ async def nurse_chat_bot(sender, text):
                     if status == "filled":
                         asyncio.create_task(send_message(sender, "Sorry, the shift has already been filled. We will update you when more shifts are available for you.")) 
                         continue
+                    shift_detail = await search_shift_by_id(shift_ids)
+                    if shift_detail:
+                        shift_value = shift_detail["shift_value"]
+                        shift_date = shift_detail["date"]
+                        start_time, end_time = await get_shift_start_end(facility_name, nurse_type, shift_value)
+                        if start_time and end_time:
+                            start_str = start_time.strftime("%H:%M")
+                            end_str = end_time.strftime("%H:%M")
+                            if is_past_halfway(start_str, end_str, shift_date.strftime("%Y-%m-%d")):
+                                asyncio.create_task(send_message(sender, f"The shift you asked to cover at {facility_name} on {convert_to_md(shift_date)} cannot be accepted. More than half of the shift has already passed. Please choose a different shift."))
+                                continue
+
                     await update_coordinator(shift_ids, sender)
+                    confirmed_dates.append(convert_to_md(shift_date))
+
                 else:
                     print("No shift found")
 
@@ -733,36 +824,48 @@ async def nurse_chat_bot(sender, text):
         if reply_message.get("index_selection"):
             index_selection = reply_message["index_selection"]
             shift_index_map = await get_shift_index_map(sender)
-            nurse_info = await get_nurse_info(sender)
-            nurse_type = nurse_info["nurse_type"]
-            shift = nurse_info["shift"]
-
+            confirmed_dates = []
             for index in index_selection:
                 index = str(index)
                 if index in shift_index_map:
                     facility_name = sanitize_facility_name(shift_index_map[index]["facility"])
                     date = shift_index_map[index]["date"]
-                    shift_id = await search_by_date(date, facility_name, nurse_type, shift)
+                    nurse_type = shift_index_map[index]["nurse_type"]
+                    shift_value = shift_index_map[index]["shift_value"]
+                    parsed_date = datetime.strptime(date, "%Y-%m-%d").date()
+                    shift_id = await search_by_date(str(parsed_date), facility_name, nurse_type, shift_value)
                     formatted_date = format_date(date)
                     if not shift_id:
-                        asyncio.create_task(send_message(sender, f"No shift found for {formatted_date} at {facility_name} for {nurse_type} {shift} shift"))
+                        asyncio.create_task(send_message(sender, f"The shift requested at {facility_name.title()} on {formatted_date} for {nurse_type} {shift_value} does not match your profile."))
                         continue
                     valid_shift = await check_shift_validity(shift_id, sender)
                     if not valid_shift:
                         continue
                     status = await check_shift_status(shift_id, sender)
                     if status == "filled":
-                        asyncio.create_task(send_message(sender, "Sorry, the shift has already been filled. We will update you when more shifts are available for you."))
+                        asyncio.create_task(send_message(sender, f"Sorry, the shift on {formatted_date} at {facility_name.title()} has already been filled."))
+                        continue
+                    start_time, end_time = await get_shift_start_end(facility_name, nurse_type, shift_value)
+                    if start_time and end_time:
+                        start_str = start_time.strftime("%H:%M")
+                        end_str = end_time.strftime("%H:%M")
+                        if is_past_halfway(start_str, end_str, date):
+                            asyncio.create_task(send_message(
+                                sender,
+                                f"The shift you asked to cover at {facility_name.title()} on {formatted_date} cannot be accepted. More than half of the shift has already passed. Please choose a different shift."
+                            ))
                         continue
                     await update_coordinator(shift_id, sender)
                     confirmed_dates.append(formatted_date)
-            #  🔁 Update the reply message dynamically with dates
             if confirmed_dates:
                 if len(confirmed_dates) == 1:
                     reply_message["message"] = f"Thanks! I've marked you for the selected shift on {confirmed_dates[0]}."
                 else:
                     dates_str = ", ".join(confirmed_dates)
                     reply_message["message"] = f"Thanks! I've marked you for the selected shifts on {dates_str}."
+                return {"message": reply_message["message"]}
+            # else:
+            #     return {"message": "None of the selected shifts could be booked. Please try different options or dates."}
 
         # Direct confirmation using detected dates and known nurse type/shift
         if not reply_message.get("index_selection") and not reply_message.get("confirmed_dates"):

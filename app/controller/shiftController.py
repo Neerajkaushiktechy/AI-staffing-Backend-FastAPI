@@ -424,30 +424,34 @@ async def check_shift_validity(shift_id: int, nurse_phone_number: str) -> bool:
 
     distance = haversine_distance(facility_lat, facility_lng, nurse_lat, nurse_lng)
     location_match = distance <= 50
+    nurse_type_match = nurse_type.lower() == nurse_type_from_db.lower()
+    shift_match = True  # Can add shift match check if needed
 
-    if (
-        shift.lower() != nurse_shift.lower()
-        or not location_match
-        or nurse_type.lower() != nurse_type_from_db.lower()
-    ):
+    if not location_match:
         asyncio.create_task(send_message(
             nurse_phone_number,
-            f"The shift requested at {facility_name} on {formatted_date} does not match your profile."
-        )) 
+            f"The facility '{facility_name}' is more than 50 miles from your location. We only send nearby shift requests."
+        ))
         return False
 
-    is_available = await check_nurse_availability(nurse_id, shift_id)
+    if not nurse_type_match:
+        asyncio.create_task(send_message(
+            nurse_phone_number,
+            f"The shift at {facility_name} on {formatted_date} is for a {nurse_type} nurse, but your profile is {nurse_type_from_db}."
+        ))
+        return False
 
+    is_available, reason = await check_nurse_availability(nurse_id, shift_id)
     if not is_available:
         asyncio.create_task(send_message(
             nurse_phone_number,
-            f"The shift you asked to cover at {facility_name} on {convert_to_md(formatted_date)} conflicts with your other shift and thus cannot be covered by you."
+            f"The shift you asked to cover at {facility_name} on {convert_to_md(formatted_date)} cannot be accepted. {reason}"
         ))
         return False
 
     return True
 
-async def get_shift_id_by_name(facility_name: str, nurse_type: str, shift: str, sender: str):
+async def get_shift_id_by_name(facility_name: str, nurse_type: str, shift: str = None, sender: str = None):
     facility = await db.fetchrow("""
         SELECT id
         FROM facilities
@@ -455,30 +459,46 @@ async def get_shift_id_by_name(facility_name: str, nurse_type: str, shift: str, 
     """, facility_name)
 
     if not facility:
-        message = "The facility name you provided does not exist. Make sure the name is correct."
-        asyncio.create_task(send_message(sender, message))
+        if sender:
+            message = "The facility name you provided does not exist. Make sure the name is correct."
+            asyncio.create_task(send_message(sender, message))
         raise Exception("Facility not found")
 
     facility_id = facility['id']
 
-    shift_rows = await db.fetch("""
-        SELECT id
-        FROM shift_tracker
-        WHERE nurse_type ILIKE $1
-          AND shift ILIKE $2
-          AND facility_id = $3
-          AND status = 'open'
-          AND nurse_id IS NULL
-          AND date >= CURRENT_DATE
-    """, nurse_type, shift, facility_id)
+    # Build query based on whether shift is provided
+    if shift:
+        query = """
+            SELECT id
+            FROM shift_tracker
+            WHERE nurse_type ILIKE $1
+              AND shift ILIKE $2
+              AND facility_id = $3
+              AND status = 'open'
+              AND nurse_id IS NULL
+              AND date >= CURRENT_DATE
+        """
+        shift_rows = await db.fetch(query, nurse_type, shift, facility_id)
+    else:
+        query = """
+            SELECT id
+            FROM shift_tracker
+            WHERE nurse_type ILIKE $1
+              AND facility_id = $2
+              AND status = 'open'
+              AND nurse_id IS NULL
+              AND date >= CURRENT_DATE
+        """
+        shift_rows = await db.fetch(query, nurse_type, facility_id)
 
     if len(shift_rows) == 1:
         return shift_rows[0]['id']  # Return single shift ID
     elif len(shift_rows) > 1:
         return [row['id'] for row in shift_rows]  # Return list of shift IDs
     else:
-        message = "There are no shifts matching your profile for the facility you provided. Please make sure you have provided the correct information."
-        asyncio.create_task(send_message(sender, message)) 
+        if sender:
+            message = "There are no available shifts matching your profile at the specified facility."
+            asyncio.create_task(send_message(sender, message))
         return None
 
 async def search_by_date(date: str, facility_name: str, nurse_type: str, shift: str):
