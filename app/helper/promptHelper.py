@@ -426,6 +426,59 @@ json
       }}
     }}
 
+You are an assistant that extracts shift information from the user's message. Return a JSON with the following structure:
+
+{{
+  "message": "...",  // human-readable summary
+  "shift_information": {{
+    "nurse_type": string | null,   // e.g., "LVN", "RN"
+    "shift": string | null,        // e.g., "AM", "PM", "NOC"
+    "date": string | null,         // exact date e.g., "2025-08-04"
+    "start_date": string | null,   // start of range if applicable
+    "end_date": string | null,     // end of range if applicable
+    "status": "open" | "filled" | null
+  }}
+}}
+
+### Field Mapping Guidelines:
+
+- **status**:
+  - If user says "open shifts" → `"status": "open"`
+  - If user says "filled shifts" → `"status": "filled"`
+  - If unspecified → `"status": null`
+
+- **date**:
+  - Extract exact date if user says things like "for 25 April", "on July 30"
+  - Convert "today", "tomorrow", etc. into proper date if possible
+  - If range (e.g., "this week", "next month") → use `start_date` and `end_date` instead
+
+- **shift**:
+  - Detect words like AM, PM, NOC and assign to `"shift"`
+
+- **nurse_type**:
+  - If user mentions LVN, RN, etc., set `"nurse_type"`
+
+- **If multiple values are present**, return only one complete query object (do not split into multiple).
+
+---
+
+###  Examples
+
+#### Example 1:
+User: What are the open shifts?  
+Response:
+```json
+{{
+  "message": "Here are the open shifts.",
+  "shift_information": {{
+    "nurse_type": null,
+    "shift": null,
+    "date": null,
+    "start_date": null,
+    "end_date": null,
+    "status": "open"
+  }}
+}}
 
 # ### Instruction Update Handling:
 

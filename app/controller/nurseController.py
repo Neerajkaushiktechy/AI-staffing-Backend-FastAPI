@@ -854,7 +854,7 @@ async def nurse_chat_bot(sender, text):
                                 sender,
                                 f"The shift you asked to cover at {facility_name.title()} on {formatted_date} cannot be accepted. More than half of the shift has already passed. Please choose a different shift."
                             ))
-                        continue
+                            continue
                     await update_coordinator(shift_id, sender)
                     confirmed_dates.append(formatted_date)
             if confirmed_dates:

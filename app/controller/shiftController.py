@@ -271,6 +271,14 @@ async def search_shifts_in_db(
         query += f" AND s.date BETWEEN ${idx} AND ${idx+1}"
         params.extend([sd, ed])
         idx += 2
+    elif start_date:
+        # If only the start_date is provided (end_date is missing),
+        # fetch all shifts starting from the given start_date onward.
+        sd = datetime.strptime(start_date, "%Y-%m-%d").date()
+        query += f" AND s.date >= ${idx}"
+        params.append(sd)
+        idx += 1
+
 
     # Execute
     rows = await db.fetch(query, *params)
@@ -645,6 +653,7 @@ async def admin_get_shifts(request: Request, response: Response):
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from typing import Optional
+from datetime import date
 import asyncio
 
 async def admin_get_all_shifts(request: Request, response: Response):
@@ -690,6 +699,12 @@ async def admin_get_all_shifts(request: Request, response: Response):
             values.append(shift_type)
             count_values.append(shift_type)
 
+        # ✅ Filter to exclude past dates in admin get listing
+        today = date.today()
+        conditions.append(f"s.date >= ${len(values)+1}")
+        values.append(today)
+        count_values.append(today)
+
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         query = f"""
@@ -718,7 +733,7 @@ async def admin_get_all_shifts(request: Request, response: Response):
         """
         result, count_result = await asyncio.gather(
             db.fetch(query, *values),
-            db.fetch(count_query, *count_values) if count_values else db.fetch(count_query)
+            db.fetch(count_query, *count_values)
         )
 
         total = int(count_result[0]["total"]) if count_result else 0
@@ -995,3 +1010,36 @@ async def admin_edit_shift(request: Request, response: Response, id: int):
     except Exception as e:
         print("Error editing shift:", str(e))
         raise HTTPException(status_code=500, detail="Server error")
+
+async def admin_resend_shift_notification(request, response):
+    try:
+        data = await request.json()
+        shift_id = data.get("shift_id")
+
+        if not shift_id:
+            return {"error": "shift_id is required"}
+
+        shift = await db.fetchrow(
+            "SELECT nurse_type, shift, date, additional_instructions FROM shift_tracker WHERE id = $1 AND status = 'open'",
+            shift_id
+        )
+
+        if not shift:
+            return {"error": "Shift not found or is not open"}
+
+        nurse_type = shift["nurse_type"]
+        shift_time = shift["shift"]
+        date = shift["date"].strftime("%Y-%m-%d")
+        additional_instructions = shift["additional_instructions"]
+
+        nurses = await search_nurses(nurse_type, shift_time, shift_id)
+        if not nurses:
+            return {"message": f"No {nurse_type} nurses found for this shift"}
+
+        await send_nurses_message(nurses, nurse_type, shift_time, shift_id, date, additional_instructions)
+
+        return {"message": f"Notification resent to {len(nurses)} {nurse_type} nurses"}
+
+    except Exception as e:
+        print("Unexpected error in resend notification:", e)
+        raise HTTPException(status_code=500, detail="An error has occurred")

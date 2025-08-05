@@ -1,4 +1,4 @@
-from app.controller.shiftController import admin_get_shifts, admin_get_all_shifts, admin_delete_shift, admin_add_shift, admin_get_shift_by_id, admin_edit_shift
+from app.controller.shiftController import admin_get_shifts, admin_get_all_shifts, admin_delete_shift, admin_add_shift, admin_get_shift_by_id, admin_edit_shift, admin_resend_shift_notification
 from fastapi import APIRouter, Request, Response, Depends
 from app.middleware.auth import get_current_user
 
@@ -27,3 +27,7 @@ async def get_shift_by_id(request: Request, response: Response, id: int, user=De
 @router.put("/edit-shift/{id}")
 async def edit_shift(request: Request, response: Response, id: int, user=Depends(get_current_user)):
     return await admin_edit_shift(request, response, id=id)
+
+@router.post("/resend-shift-notification")
+async def resend_shift_notification(request: Request, response: Response, user=Depends(get_current_user)):
+    return await admin_resend_shift_notification(request, response)

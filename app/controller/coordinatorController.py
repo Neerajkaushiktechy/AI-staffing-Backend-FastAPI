@@ -526,7 +526,8 @@ async def coordinator_chat_bot(sender,text):
         if reply_message.get("instruction_update_request"):
             return await handle_instruction_update_request(sender, reply_message["instruction_update_request"], db, cache)
 
-        #  Handle nurse_details (shift creation or instruction-only update)
+        VALID_NURSE_TYPES = ["CNA", "LVN", "RN"]
+
         if reply_message.get("nurse_details"):
             nurse_details_list = (
                 reply_message["nurse_details"]
@@ -542,9 +543,22 @@ async def coordinator_chat_bot(sender,text):
                 date = nurse_detail["date"]
                 additional_instructions = nurse_detail.get("additional_instructions", "")
 
+                # Check for invalid nurse type spelling
+                if nurse_type.upper() not in VALID_NURSE_TYPES:
+                    response_text = (
+                        f"The nurse type '{nurse_type}' is not valid. "
+                        f"Please choose a valid nurse type: {', '.join(VALID_NURSE_TYPES)}."
+                    )
+                    await update_coordinator_chat_history(sender, response_text, "sent")
+                    return {"message": response_text}
+
+                # Check if coordinator has access to the nurse type
                 nurse_exists = await check_nurse_type(sender, nurse_type)
                 if not nurse_exists:
-                    response_text = f"The nurse type '{nurse_type}' is not available for your facility. Please choose a different nurse type."
+                    response_text = (
+                        f"You are not eligible to create shifts for the '{nurse_type}' nurse type. "
+                        "Please select a nurse type you are eligible for."
+                    )
                     await update_coordinator_chat_history(sender, response_text, "sent")
                     return {"message": response_text}
                 
@@ -756,7 +770,37 @@ async def coordinator_chat_bot(sender,text):
             requested_status = shift_info.get("status")
             requested_start_date = shift_info.get("start_date")
             requested_end_date = shift_info.get("end_date")
+            
+            today = datetime.today().date()
+             
+             # Inject today's date if no date provided
+            if not requested_date and not requested_start_date and not requested_end_date:
+                requested_start_date = today.isoformat()
+                print("No date provided, using today and future dates from:", requested_start_date)
+                if "message" in reply_message:
+                    reply_message["message"] = "Here are the shifts you have booked for today and upcoming days."
 
+             # Case 1: Specific date (e.g., 7/30)
+            if requested_date:
+                date_obj = datetime.strptime(requested_date, "%Y-%m-%d").date()
+                if date_obj < today:
+                    response_text = (
+                        f"The date you requested {date_obj.strftime('%-m/%-d')} has already passed. "
+                        "We can't book or display shifts for past dates."
+                    )
+                    return {"message": response_text}
+
+            # Case 2: Date range
+            if requested_start_date and requested_end_date:
+                start_obj = datetime.strptime(requested_start_date, "%Y-%m-%d").date()
+                end_obj = datetime.strptime(requested_end_date, "%Y-%m-%d").date()
+
+                if end_obj < today:
+                    response_text = "That range has already passed. No shifts available for past date ranges."
+                    return {"message": response_text}
+
+                if start_obj < today:
+                    requested_start_date = today.isoformat()
             # Call your database function to get the actual shifts
             actual_shifts = await search_shifts_in_db(
                 date=requested_date,
@@ -771,19 +815,21 @@ async def coordinator_chat_bot(sender,text):
             if actual_shifts:
               shift_list_lines = []
               for s in actual_shifts:
-                formatted_date = datetime.strptime(s['date'], "%Y-%m-%d").strftime("%-m/%-d")
-                if s['status'] == "filled" and s.get('nurse_name') and s.get('nurse_phone'):
-                    line = (
-                        f"- Date: {formatted_date}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, "
-                        f"Status: {s['status']}, Nurse: {s['nurse_name']} ({s['nurse_phone']})"
-                    )
-                else:
-                    line = (
-                        f"- Date: {formatted_date}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, "
-                        f"Status: {s['status']}"
-                    )
+                    if requested_status and s['status'] != requested_status:
+                        continue  # Skip non-matching shifts
+                    formatted_date = datetime.strptime(s['date'], "%Y-%m-%d").strftime("%-m/%-d")
+                    if s['status'] == "filled" and s.get('nurse_name') and s.get('nurse_phone'):
+                        line = (
+                            f"- Date: {formatted_date}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, "
+                            f"Status: {s['status']}, Nurse: {s['nurse_name']} ({s['nurse_phone']})"
+                        )
+                    else:
+                        line = (
+                            f"- Date: {formatted_date}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, "
+                            f"Status: {s['status']}"
+                        )
+                    shift_list_lines.append(line)  # <<-- This line must be inside the loop
 
-              shift_list_lines.append(line)
               response_text = "Here are the shifts that match your criteria:\n" + "\n".join(shift_list_lines)
             else:
               response_text = "I couldn't find any shifts matching your criteria."
