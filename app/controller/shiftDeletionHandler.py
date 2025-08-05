@@ -14,8 +14,8 @@ DELETE_KEYWORDS = {"delete", "delte", "remove", "cancel", "i want to delete"}
 # Delete shift by ID
 async def delete_shift(shift_id, created_by, nurse_id=None, nurse_type=None, shift_value=None, location=None, date=None, name=None):
     try:
-        result = await db.execute("DELETE FROM shift_tracker WHERE id = $1", shift_id)
-        if result == "DELETE 0":
+        result = await db.execute("UPDATE shift_tracker SET is_deleted = TRUE WHERE id = $1", shift_id)
+        if result == "UPDATE 0":
             return False
 
         if nurse_id:
@@ -106,11 +106,22 @@ async def handle_index_reply_for_shift_deletion(sender, text, db, cache):
         return {"message": "❌ Invalid input. Please reply with shift number(s) like '1' or '1,2'."}
 
 async def handle_deletion_confirmation(sender, text, db, cache):
+    cleaned = text.strip().lower()
+
+    if await cache.get(sender + "_pending_delete_all_confirmation"):
+        if cleaned == "no":
+            await cache.delete(sender + "_pending_delete_all_confirmation")
+            return {"message": "❎ Cancelled deletion of all shifts."}
+        elif cleaned == "yes":
+            await cache.delete(sender + "_pending_delete_all_confirmation")
+            return await handle_delete_all_shifts(sender, db)
+        else:
+            return {"message": "Please reply with 'yes' or 'no' to confirm deletion of all shifts."}
+
     raw = await cache.get(sender + "_pending_deletion_confirmation")
     if not raw:
         return None
 
-    cleaned = text.strip().lower()
     if cleaned == "no":
         await cache.delete(sender + "_pending_deletion_confirmation")
         return {"message": "❎ Deletion cancelled."}
@@ -178,7 +189,7 @@ async def handle_shift_delete_request(reply_message, sender, db, cache):
         #     "shifts": matching_shifts,
         #     "single": True
         # }))
-        await cache.set(sender + "_pending_deletion_confirmation", json.dumps({"shift": shift}))  # ✅ Change this
+        await cache.set(sender + "_pending_deletion_confirmation", json.dumps({"shifts": [shift]}))
 
         return {
             "message": f"⚠️ Are you sure you want to delete shift ID {shift['id']}: {shift['nurse_type']} {shift['shift']} on {convert_to_md(shift['date'])}? Reply 'yes' to confirm or 'no' to cancel."

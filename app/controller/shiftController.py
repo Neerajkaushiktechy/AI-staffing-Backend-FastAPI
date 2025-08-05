@@ -228,6 +228,7 @@ async def search_shifts_in_db(
     FROM shift_tracker s
     LEFT JOIN nurses n ON s.nurse_id = n.id
     WHERE 1=1
+      AND s.is_deleted = FALSE
     """
     
     params = []
@@ -670,6 +671,8 @@ async def admin_get_all_shifts(request: Request, response: Response):
         conditions = []
         values = []
         count_values = []
+
+        conditions.append("s.is_deleted = FALSE")
 
         if search:
             search_term = f"%{search.lower()}%"

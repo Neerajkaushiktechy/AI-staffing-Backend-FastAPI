@@ -430,6 +430,7 @@ async def coordinator_chat_bot(sender,text):
     handle_shift_delete_request,
     handle_delete_all_shifts,
     handle_deletion_confirmation,
+    fetch_all_shifts_for_coordinator
     )
     await update_coordinator_chat_history(sender, text, "received")
     past_messages = await get_coordinator_chat_data(sender)
@@ -489,7 +490,14 @@ async def coordinator_chat_bot(sender,text):
     
         # Handle delete_all request
         if reply_message.get("delete_all"):
-            return await handle_delete_all_shifts(sender, db)
+            if not await cache.get(sender + "_pending_delete_all_confirmation"):
+                shifts = await fetch_all_shifts_for_coordinator(sender, db)
+                if not shifts:
+                    return {"message": "You don't have any upcoming shifts to delete."}
+                await cache.set(sender + "_pending_delete_all_confirmation", "true")
+                return {
+                    "message": f"⚠️ You have {len(shifts)} upcoming shift(s).\nAre you sure you want to delete *all*?\nReply 'yes' to confirm or 'no' to cancel."
+                }
 
         #  Handle AI-detected shift delete request by nurse_type, shift, date
         if "shift_delete_request" in reply_message:
@@ -503,6 +511,20 @@ async def coordinator_chat_bot(sender,text):
                 if not matching_shifts:
                     return {"message": f"No shifts found on {convert_to_md(req['date'])}."}
 
+                if len(matching_shifts) == 1:
+                    shift = matching_shifts[0]
+                    await cache.set(sender + "_pending_deletion_confirmation", json.dumps({"shifts": [shift]}))
+
+                    return {
+                        "message": (
+                            "⚠️ Are you sure you want to delete the following shift:\n"
+                            f"- Date: {convert_to_md(shift['date'])}, Shift: {shift['shift']}, "
+                            f"Nurse Type: {shift['nurse_type']}, Status: {shift['status']}\n\n"
+                            "Reply 'yes' to confirm or 'no' to cancel."
+                        )
+                    }
+
+                # Multiple shifts — show index list
                 await cache.set(sender + "_awaiting_shift_delete", json.dumps({
                     "shifts": matching_shifts
                 }))
@@ -514,7 +536,7 @@ async def coordinator_chat_bot(sender,text):
                     )
 
                 return {
-                    "message": "\n".join(response_lines) + "\nPlease reply with the index of the shift you'd like to delete"
+                    "message": "\n".join(response_lines) + "\nPlease reply with the index of the shift you'd like to delete."
                 }
 
             else:
