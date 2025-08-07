@@ -6,9 +6,11 @@ from app.utils.normalizeDate import normalize_date
 from math import radians, sin, cos, sqrt, atan2
 import asyncio
 from datetime import datetime,date as dt_date
-from fastapi import Request, Response, HTTPException
+from fastapi import Request, Response, HTTPException, params
 from app.utils.serialize_row import serialize_row
 from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
+from app.utils.cache import cache
+
 async def create_shift(
     created_by: str,
     nurse_type: str,
@@ -170,7 +172,7 @@ async def search_shift_by_id(shift_id: int):
     shift = await db.fetchrow("""
         SELECT nurse_id, nurse_type, shift, facility_id, date
         FROM shift_tracker
-        WHERE id = $1
+        WHERE id = $1 AND is_deleted = FALSE
     """, shift_id)
 
     if not shift:
@@ -486,6 +488,7 @@ async def get_shift_id_by_name(facility_name: str, nurse_type: str, shift: str =
               AND status = 'open'
               AND nurse_id IS NULL
               AND date >= CURRENT_DATE
+              AND is_deleted = FALSE
         """
         shift_rows = await db.fetch(query, nurse_type, shift, facility_id)
     else:
@@ -497,6 +500,7 @@ async def get_shift_id_by_name(facility_name: str, nurse_type: str, shift: str =
               AND status = 'open'
               AND nurse_id IS NULL
               AND date >= CURRENT_DATE
+              AND is_deleted = FALSE
         """
         shift_rows = await db.fetch(query, nurse_type, facility_id)
 
@@ -667,6 +671,14 @@ async def admin_get_all_shifts(request: Request, response: Response):
         status = params.get("status")
         nurse_type = params.get("nurse_type")
         shift_type = params.get("shift_type")
+        start_date_str = params.get("start_date")
+        end_date_str = params.get("end_date")
+        start_date = (
+            datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str else None
+        )
+        end_date = (
+            datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str else None
+        )
 
         conditions = []
         values = []
@@ -701,6 +713,16 @@ async def admin_get_all_shifts(request: Request, response: Response):
             conditions.append(f"s.shift = ${len(values)+1}")
             values.append(shift_type)
             count_values.append(shift_type)
+        if start_date:
+            conditions.append(f"s.date >= ${len(values)+1}")
+            values.append(start_date)
+            count_values.append(start_date)
+
+        if end_date:
+            conditions.append(f"s.date <= ${len(values)+1}")
+            values.append(end_date)
+            count_values.append(end_date)
+
 
         # ✅ Filter to exclude past dates in admin get listing
         today = date.today()
@@ -770,7 +792,8 @@ async def admin_delete_shift(request: Request, response: Response, shift_id: int
         # 1. Fetch shift details
         shift_details = await db.fetchrow("""
             SELECT coordinator_id, nurse_id, date, shift, nurse_type, status, facility_id
-            FROM shift_tracker WHERE id = $1
+            FROM shift_tracker 
+            WHERE id = $1 AND is_deleted = FALSE
         """, shift_id)
 
         if not shift_details:
@@ -820,11 +843,11 @@ async def admin_delete_shift(request: Request, response: Response, shift_id: int
 
             nurse_phone = nurse_contact["mobile_number"] if nurse_contact else None
             if nurse_phone:
-               asyncio.create_task(send_message(nurse_phone, message))
+              asyncio.create_task(send_message(nurse_phone, message))
 
         # 6. Delete the shift
         await db.execute("""
-            DELETE FROM shift_tracker WHERE id = $1
+            UPDATE shift_tracker SET is_deleted = TRUE WHERE id = $1
         """, shift_id)
 
         return JSONResponse(content={"message": "Shift deleted successfully", "status": 200})
@@ -1038,6 +1061,11 @@ async def admin_resend_shift_notification(request, response):
         nurses = await search_nurses(nurse_type, shift_time, shift_id)
         if not nurses:
             return {"message": f"No {nurse_type} nurses found for this shift"}
+        
+        # ✅ Set cache for each nurse BEFORE sending message
+        for nurse in nurses:
+            sender = nurse["mobile_number"]
+            await cache.set(sender + "_resend_notification_shift_id", shift_id)
 
         await send_nurses_message(nurses, nurse_type, shift_time, shift_id, date, additional_instructions)
 

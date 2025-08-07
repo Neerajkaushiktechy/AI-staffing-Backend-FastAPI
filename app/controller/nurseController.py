@@ -19,6 +19,7 @@ from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
 import traceback
 from datetime import datetime, timedelta
 from dateutil import parser as date_parser
+from app.utils.cache import cache
 import re
 
 logger = logging.getLogger(__name__)
@@ -131,7 +132,7 @@ async def check_nurse_availability(nurse_id: int, shift_id: int) -> tuple[bool, 
             SELECT st.shift, st.nurse_type, f.name AS facility_name
             FROM shift_tracker st
             JOIN facilities f ON st.facility_id = f.id
-            WHERE st.nurse_id = $1 AND st.date = $2
+            WHERE st.nurse_id = $1 AND st.date = $2 AND st.is_deleted = FALSE
         """, nurse_id, shift_date)
 
         # If already 2 shifts -> block
@@ -737,6 +738,53 @@ async def nurse_chat_bot(sender, text):
 
         await update_nurse_chat_history(sender, reply_message["message"], "sent")
         print("replyMessage for nurse:", reply_message)
+
+        resend_shift_id = await cache.get(sender + "_resend_notification_shift_id")
+        facility_names = reply_message.get("facility_name")
+        print(facility_names,"Hi Priya")
+        if resend_shift_id:
+            if text.lower().strip() == "yes":
+                shift_detail = await search_shift_by_id(resend_shift_id)
+
+                if not shift_detail:
+                    await cache.delete(sender + "_resend_notification_shift_id")
+                    return {"message": "❌ Sorry, the shift was not found or may have been removed."}
+
+                shift_date = shift_detail["date"]
+                facility = shift_detail["facility_name"]  # ✅ Correct key
+                nurse_type = shift_detail["nurse_type"]
+                shift_val = shift_detail["shift_value"]
+
+                # ✅ Check if shift is still valid for this nurse
+                valid_shift = await check_shift_validity(resend_shift_id, sender)
+                if not valid_shift:
+                    await cache.delete(sender + "_resend_notification_shift_id")
+                    return {"message": "❌ Sorry, you're not eligible for this shift anymore."}
+
+                # ✅ Check if shift already filled
+                status = await check_shift_status(resend_shift_id, sender)
+                if status == "filled":
+                    await cache.delete(sender + "_resend_notification_shift_id")
+                    return {"message": f"❌ Sorry, the shift on {convert_to_md(shift_date)} is already filled."}
+
+                # ✅ Optional: Add half-shift time passed check if needed
+                start_time, end_time = await get_shift_start_end(facility, nurse_type, shift_val)
+                if start_time and end_time:
+                    start_str = start_time.strftime("%H:%M")
+                    end_str = end_time.strftime("%H:%M")
+                    if is_past_halfway(start_str, end_str, shift_date.strftime("%Y-%m-%d")):
+                        await cache.delete(sender + "_resend_notification_shift_id")
+                        return {"message": f"The shift you asked to cover at {facility} on {convert_to_md(shift_date)} cannot be accepted. More than half of the shift has already passed. Please choose a different shift."}
+
+                # ✅ If all checks pass
+                await update_coordinator(resend_shift_id, sender)
+                await cache.delete(sender + "_resend_notification_shift_id")
+                return {"message": f"Thanks! I've marked you for the selected shift on {convert_to_md(shift_date)}."}
+
+
+            elif text.lower().strip() == "no":
+                await cache.delete(sender + "_resend_notification_shift_id")
+                return {"message": "❎ No problem. Let us know if you're available for another shift."}
 
         # Helper function to format date
         def format_date(date_str: str) -> str:

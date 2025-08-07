@@ -124,7 +124,9 @@ async def handle_deletion_confirmation(sender, text, db, cache):
 
     if cleaned == "no":
         await cache.delete(sender + "_pending_deletion_confirmation")
-        return {"message": "❎ Deletion cancelled."}
+        await cache.delete(sender + "_awaiting_shift_delete")
+        await cache.delete(sender + "_pending_delete_all_confirmation")
+        return {"message": "❎ Deletion cancelled. All set! Let me know if you need anything else."}
 
     if cleaned == "yes":
         data = json.loads(raw)
@@ -173,12 +175,15 @@ async def handle_deletion_confirmation(sender, text, db, cache):
 async def handle_shift_delete_request(reply_message, sender, db, cache):
     delete_req = reply_message["shift_delete_request"]
 
-    matching_shifts = await search_shifts_in_db(
-        date=delete_req.get("date"),
-        nurse_type=delete_req["nurse_type"],
-        shift=delete_req["shift"],
-        sender_phone=sender
-    )
+    if not delete_req.get("date") and not delete_req.get("nurse_type") and not delete_req.get("shift"):
+        matching_shifts = await search_shifts_in_db(sender_phone=sender)
+    else:
+        matching_shifts = await search_shifts_in_db(
+            date=delete_req.get("date"),
+            nurse_type=delete_req.get("nurse_type"),
+            shift=delete_req.get("shift"),
+            sender_phone=sender
+        )
 
     if not matching_shifts:
         return {"message": f"No upcoming {delete_req['nurse_type']} {delete_req['shift']} shifts found."}
@@ -198,8 +203,10 @@ async def handle_shift_delete_request(reply_message, sender, db, cache):
     await cache.set(sender + "_awaiting_shift_delete", json.dumps({"shifts": matching_shifts}))
     lines = ["Here are the shifts that match your criteria:"]
     for i, s in enumerate(matching_shifts):
-        lines.append(f"{i}. Date: {convert_to_md(s['date'])}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, Status: {s['status']}")
-    lines.append("\nPlease reply with the index of the shift you'd like to delete.")
+        shift_date = s.get("date")
+        display_date = convert_to_md(shift_date) if shift_date else "Unknown"
+        lines.append(f"{i}. Date: {display_date}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, Status: {s['status']}")
+        lines.append("\nPlease reply with the index of the shift you'd like to delete.")
     return {"message": "\n".join(lines)}
 
 # Delete all shifts for coordinator
@@ -209,7 +216,7 @@ async def fetch_all_shifts_for_coordinator(sender, db):
     )
     if not coordinator:
         return []
-    return await db.fetch("SELECT id FROM shift_tracker WHERE facility_id = $1", coordinator["facility_id"])
+    return await db.fetch("SELECT id FROM shift_tracker WHERE facility_id = $1 AND is_deleted = FALSE", coordinator["facility_id"])
 
 async def handle_delete_all_shifts(sender, db):
     shifts = await fetch_all_shifts_for_coordinator(sender, db)
