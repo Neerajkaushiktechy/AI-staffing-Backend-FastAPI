@@ -274,13 +274,13 @@ async def search_shifts_in_db(
         query += f" AND s.date BETWEEN ${idx} AND ${idx+1}"
         params.extend([sd, ed])
         idx += 2
-    elif start_date:
-        # If only the start_date is provided (end_date is missing),
-        # fetch all shifts starting from the given start_date onward.
-        sd = datetime.strptime(start_date, "%Y-%m-%d").date()
-        query += f" AND s.date >= ${idx}"
-        params.append(sd)
-        idx += 1
+    # elif start_date:
+    #     # If only the start_date is provided (end_date is missing),
+    #     # fetch all shifts starting from the given start_date onward.
+    #     sd = datetime.strptime(start_date, "%Y-%m-%d").date()
+    #     query += f" AND s.date >= ${idx}"
+    #     params.append(sd)
+    #     idx += 1
 
 
     # Execute
@@ -725,10 +725,10 @@ async def admin_get_all_shifts(request: Request, response: Response):
 
 
         # ✅ Filter to exclude past dates in admin get listing
-        today = date.today()
-        conditions.append(f"s.date >= ${len(values)+1}")
-        values.append(today)
-        count_values.append(today)
+        # today = date.today()
+        # conditions.append(f"s.date >= ${len(values)+1}")
+        # values.append(today)
+        # count_values.append(today)
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 

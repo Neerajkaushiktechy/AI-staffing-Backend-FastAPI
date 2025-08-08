@@ -517,10 +517,9 @@ async def coordinator_chat_bot(sender,text):
 
                     return {
                         "message": (
-                            "⚠️ Are you sure you want to delete the following shift:\n"
-                            f"- Date: {convert_to_md(shift['date'])}, Shift: {shift['shift']}, "
-                            f"Nurse Type: {shift['nurse_type']}, Status: {shift['status']}\n\n"
-                            "Reply 'yes' to confirm or 'no' to cancel."
+                            f"⚠️ Just to confirm — you want to delete this shift:\n"
+                            f"1) {convert_to_md(shift['date'])} – {shift['shift']}, {shift['nurse_type']}, {shift['status'].capitalize()}\n\n"
+                            "Type 'yes' to delete or 'no' to keep them."
                         )
                     }
 
@@ -529,15 +528,19 @@ async def coordinator_chat_bot(sender,text):
                     "shifts": matching_shifts
                 }))
 
-                response_lines = ["Here are the shifts that match your criteria:"]
-                for idx, s in enumerate(matching_shifts):
-                    response_lines.append(
-                        f"{idx}. Date: {convert_to_md(s['date'])}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, Status: {s['status']}"
-                    )
+                response_lines = [
+                    "Here are the shifts I found for you 👇",
+                ]
+                for idx, s in enumerate(matching_shifts, start=1):
+                    date = convert_to_md(s.get("date")) if s.get("date") else "Unknown date"
+                    shift = s.get("shift", "Unknown shift")
+                    nurse_type = s.get("nurse_type", "Unknown nurse type")
+                    status = s.get("status", "Unknown status").capitalize()
 
-                return {
-                    "message": "\n".join(response_lines) + "\nPlease reply with the index of the shift you'd like to delete."
-                }
+                    response_lines.append(f"{idx}. {date} – {shift}, {nurse_type}, {status}")
+                response_lines.append("")
+                response_lines.append("💡 Reply with the *number* of the shift you’d like me to delete.")
+                return {"message": "\n".join(response_lines)}
 
             else:
                 # Proceed with normal delete logic (nurse_type + shift known)
@@ -793,36 +796,36 @@ async def coordinator_chat_bot(sender,text):
             requested_start_date = shift_info.get("start_date")
             requested_end_date = shift_info.get("end_date")
             
-            today = datetime.today().date()
+            # today = datetime.today().date()
              
-             # Inject today's date if no date provided
-            if not requested_date and not requested_start_date and not requested_end_date:
-                requested_start_date = today.isoformat()
-                print("No date provided, using today and future dates from:", requested_start_date)
-                if "message" in reply_message:
-                    reply_message["message"] = "Here are the shifts you have booked for today and upcoming days."
+            #  # Inject today's date if no date provided
+            # if not requested_date and not requested_start_date and not requested_end_date:
+            #     requested_start_date = today.isoformat()
+            #     print("No date provided, using today and future dates from:", requested_start_date)
+            #     if "message" in reply_message:
+            #         reply_message["message"] = "Here are the shifts you have booked for today and upcoming days."
 
-             # Case 1: Specific date (e.g., 7/30)
-            if requested_date:
-                date_obj = datetime.strptime(requested_date, "%Y-%m-%d").date()
-                if date_obj < today:
-                    response_text = (
-                        f"The date you requested {date_obj.strftime('%-m/%-d')} has already passed. "
-                        "We can't book or display shifts for past dates."
-                    )
-                    return {"message": response_text}
+            #  # Case 1: Specific date (e.g., 7/30)
+            # if requested_date:
+            #     date_obj = datetime.strptime(requested_date, "%Y-%m-%d").date()
+            #     if date_obj < today:
+            #         response_text = (
+            #             f"The date you requested {date_obj.strftime('%-m/%-d')} has already passed. "
+            #             "We can't book or display shifts for past dates."
+            #         )
+            #         return {"message": response_text}
 
-            # Case 2: Date range
-            if requested_start_date and requested_end_date:
-                start_obj = datetime.strptime(requested_start_date, "%Y-%m-%d").date()
-                end_obj = datetime.strptime(requested_end_date, "%Y-%m-%d").date()
+            # # Case 2: Date range
+            # if requested_start_date and requested_end_date:
+            #     start_obj = datetime.strptime(requested_start_date, "%Y-%m-%d").date()
+            #     end_obj = datetime.strptime(requested_end_date, "%Y-%m-%d").date()
 
-                if end_obj < today:
-                    response_text = "That range has already passed. No shifts available for past date ranges."
-                    return {"message": response_text}
+            #     if end_obj < today:
+            #         response_text = "That range has already passed. No shifts available for past date ranges."
+            #         return {"message": response_text}
 
-                if start_obj < today:
-                    requested_start_date = today.isoformat()
+            #     if start_obj < today:
+            #         requested_start_date = today.isoformat()
             # Call your database function to get the actual shifts
             actual_shifts = await search_shifts_in_db(
                 date=requested_date,

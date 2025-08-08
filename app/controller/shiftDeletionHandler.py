@@ -92,12 +92,12 @@ async def handle_index_reply_for_shift_deletion(sender, text, db, cache):
         selected_shifts = [shifts[i] for i in indexes]
         await cache.set(sender + "_pending_deletion_confirmation", json.dumps({"shifts": selected_shifts}))
 
-        confirm_lines = ["⚠️ Are you sure you want to delete the following shifts:"]
-        for shift in selected_shifts:
+        confirm_lines = ["Hey, just to confirm — you want me to remove these shifts, right?"]
+        for idx, shift in enumerate(selected_shifts, start=1):
             confirm_lines.append(
-                f"- Date: {convert_to_md(shift['date'])}, Shift: {shift['shift']}, Nurse Type: {shift['nurse_type']}, Status: {shift['status']}"
+                f"{idx}️⃣ {convert_to_md(shift['date'])} – {shift['shift']}, {shift['nurse_type']}, {shift['status'].capitalize()}"
             )
-        confirm_lines.append("Reply 'yes' to confirm or 'no' to cancel.")
+        confirm_lines.append("\nType 'yes' to delete or 'no' to keep them.")
 
         return {"message": "\n".join(confirm_lines)}
 
@@ -160,9 +160,18 @@ async def handle_deletion_confirmation(sender, text, db, cache):
 
         # ✅ Ask if they want to delete more (if shifts remain)
         if remaining_shifts:
-            lines = [msg, "\nWould you like to delete another shift? Reply with the shift number (e.g. '1')."]
-            for i, s in enumerate(remaining_shifts):
-                lines.append(f"{i}. Date: {convert_to_md(s['date'])}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, Status: {s['status']}")
+            lines = [
+                msg,
+                "",
+                "Would you like to delete another shift? Just reply with the shift number (e.g. '1') 👇",
+                ""
+            ]
+            for i, s in enumerate(remaining_shifts, start=1):
+                date = convert_to_md(s.get("date")) if s.get("date") else "Unknown date"
+                shift = s.get("shift", "Unknown shift")
+                nurse_type = s.get("nurse_type", "Unknown nurse type")
+                status = s.get("status", "Unknown status").capitalize()
+                lines.append(f"{i}. {date} – {shift}, {nurse_type}, {status}")
             return {"message": "\n".join(lines)}
         else:
             return {"message": msg}
