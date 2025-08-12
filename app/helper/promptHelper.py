@@ -87,7 +87,7 @@ async def generateReplyFromAI(text: str, past_messages: str):
             "nurse_details": None
         })
     # ✅ DELETION INTENT DETECTION
-    delete_keywords = ["delete shift", "cancel shift", "remove shift", "delete my"]
+    delete_keywords = ["delete shift", "delete a shift", "cancel shift", "remove shift", "delete my"]
     if any(kw in text_lower for kw in delete_keywords):
         # Decide between delete_all and specific delete
         if "all" in text_lower:
@@ -785,7 +785,7 @@ async def generateReplyFromAINurse(text: str, past_messages: str):
     # ✅ Auto-confirmation if facility is available in history
     if intent_classification == "positive" and last_known_facility:
       return {
-          "message": "Thank you for your willingness to help!",
+          "message": "Thanks! I've marked you for the selected shift!",
           "confirmation": True,
           "facility_name": last_known_facility
       }

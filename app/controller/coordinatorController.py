@@ -559,6 +559,10 @@ async def coordinator_chat_bot(sender,text):
                 if isinstance(reply_message["nurse_details"], list)
                 else [reply_message["nurse_details"]]
             )
+
+            created_shifts = []
+            failed_shifts = []
+
             for nurse_detail in nurse_details_list:
                 if nurse_detail is None:
                     continue
@@ -570,23 +574,17 @@ async def coordinator_chat_bot(sender,text):
 
                 # Check for invalid nurse type spelling
                 if nurse_type.upper() not in VALID_NURSE_TYPES:
-                    response_text = (
-                        f"The nurse type '{nurse_type}' is not valid. "
-                        f"Please choose a valid nurse type: {', '.join(VALID_NURSE_TYPES)}."
-                    )
-                    await update_coordinator_chat_history(sender, response_text, "sent")
-                    return {"message": response_text}
+                    failed_shifts.append(f"The nurse type '{nurse_type}' is not valid. Valid types: {', '.join(VALID_NURSE_TYPES)}.")
+                    continue
 
                 # Check if coordinator has access to the nurse type
                 nurse_exists = await check_nurse_type(sender, nurse_type)
                 if not nurse_exists:
-                    response_text = (
+                    failed_shifts.append(
                         f"You are not eligible to create shifts for the '{nurse_type}' nurse type. "
                         "Please select a nurse type you are eligible for."
                     )
-                    await update_coordinator_chat_history(sender, response_text, "sent")
-                    return {"message": response_text}
-                
+                    continue
                 if reply_message.get("intent") == "create_shift":
                     pass
 
@@ -630,15 +628,16 @@ async def coordinator_chat_bot(sender,text):
                 today = datetime.now().date()
                 now = datetime.now().time()
 
-                # Step 1: Reject Past Dates
+                # Reject Past Dates
                 if shift_date < today:
-                    formatted_date = normalize_date(date)
-                    formatted_date = convert_to_md(formatted_date)
-                    msg = f"⚠️ Oops! {formatted_date} has already passed. Please provide a future date for the shift."
-                    return {"message": msg}
+                    formatted_date = convert_to_md(normalize_date(date))
+                    failed_shifts.append(f"⚠️ Oops! {formatted_date} has already passed. Please provide a future date.")
+                    continue
 
                 if not shift:
-                    return {"message": "Please specify a valid shift (AM, PM, or NOC) to proceed with booking."}
+                    failed_shifts.append("Please specify a valid shift (AM, PM, or NOC) to proceed with booking.")
+                    continue
+
                 # Step 2: If Today, Check Shift Start Time
                 if shift_date == today:
                     # shift_time_fields = {
@@ -693,31 +692,24 @@ async def coordinator_chat_bot(sender,text):
                                 # Convert to datetime.datetime
                                 shift_start_dt = datetime.combine(now.date(), shift_start_time)
                                 shift_end_dt = datetime.combine(now.date(), shift_end_time)
-
                                 # If end time is past midnight
                                 if shift_end_dt <= shift_start_dt:
                                     shift_end_dt += timedelta(days=1)
 
-                                shift_duration = shift_end_dt - shift_start_dt
-                                half_duration = shift_duration / 2
-                                cutoff_time = shift_start_dt + half_duration
-
-                                # ⛔ Booking not allowed at or after cutoff
+                                cutoff_time = shift_start_dt + ((shift_end_dt - shift_start_dt) / 2)
                                 if now >= cutoff_time:
-                                    msg = (
+                                    failed_shifts.append(
                                         f"⚠️ Booking not allowed. The {shift.upper()} shift for {nurse_type} started at "
                                         f"{shift_start_time.strftime('%I:%M %p')} and the booking cutoff was "
                                         f"{cutoff_time.strftime('%I:%M %p')}."
                                     )
-                                    return {"message": msg}
+                                    continue
 
-                # Step 3: Proceed with Shift Creation
+                # Proceed with Shift Creation
                 shift_result = await create_shift(sender, nurse_type, shift, date, additional_instructions)
-                print(shift_result, "shift_result")
                 if isinstance(shift_result, dict) and "error" in shift_result:
-                    error_msg = shift_result["error"]
-                    print("Shift creation failed:", error_msg)
-                    return {"message": f"{error_msg}"}
+                    failed_shifts.append(shift_result["error"])
+                    continue
 
                 await db.execute(
                     "UPDATE coordinator SET last_created_shift = $1 WHERE coordinator_phone = $2 OR coordinator_email = $2",
@@ -732,8 +724,21 @@ async def coordinator_chat_bot(sender,text):
 
                 shift_id = shift_result
                 nurses = await search_nurses(nurse_type, shift, shift_id)
-                print("Nurses found:", nurses)
                 await send_nurses_message(nurses, nurse_type, shift, shift_id, date, additional_instructions)
+
+                created_shifts.append(f"{nurse_type} {shift} on {convert_to_md(date)}")
+
+            # Final message
+            if created_shifts:
+                shift_word = "shift" if len(created_shifts) == 1 else "shifts"
+                msg = f"The {', '.join(created_shifts)} {shift_word} have been accepted. You will receive confirmation soon."
+                if failed_shifts:
+                    msg += "\n\nSome of your requested shifts couldn’t be booked:\n" + "\n".join(failed_shifts)
+            else:
+                msg = "\n".join(failed_shifts)
+
+            return {"message": msg}
+        
         # if reply_message.get("shift_details") and reply_message.get("cancellation"):
         #     shift_details_list = (
         #         reply_message["shift_details"]
