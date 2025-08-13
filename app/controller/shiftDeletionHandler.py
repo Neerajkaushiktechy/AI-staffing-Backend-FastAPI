@@ -5,11 +5,69 @@ from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
 from app.database import db
 from app.utils.normalizeDate import normalize_date
 from app.utils.send_message import send_message
+from datetime import datetime, timedelta
 import re
 
 
 VAGUE = {"hi", "hello", "hey", "ok", "okay", "yes", "no"}
 DELETE_KEYWORDS = {"delete", "delte", "remove", "cancel", "i want to delete"}
+
+async def can_delete_shift(shift, sender, db):
+    """Returns (True, None) if shift can be deleted, or (False, reason_message) if blocked."""
+    today = datetime.now().date()
+    now = datetime.now()
+
+    shift_date = normalize_date(shift["date"])
+    shift_type = shift.get("shift", "Unknown shift")
+    status = shift.get("status", "").lower()
+    nurse_type = shift.get("nurse_type")
+    shift_date_obj = datetime.strptime(shift_date, "%Y-%m-%d").date()
+
+    # Past filled shifts
+    if shift_date_obj < today and status == "filled":
+        return False, (
+            f"❌ Unable to delete {shift_type} shift on {convert_to_md(shift_date)} "
+            f"because it is already filled and the time has passed."
+        )
+
+    # Ongoing shifts (today)
+    if shift_date_obj == today:
+        shift_time_fields = {
+            "AM": ("am_time_start", "am_time_end"),
+            "PM": ("pm_time_start", "pm_time_end"),
+            "NOC": ("noc_time_start", "noc_time_end")
+        }
+        time_fields = shift_time_fields.get(shift_type.upper())
+        if time_fields:
+            shift_start_field, shift_end_field = time_fields
+            coordinator = await db.fetchrow(
+                "SELECT facility_id FROM coordinator WHERE coordinator_phone = $1 OR coordinator_email = $1",
+                sender
+            )
+            if coordinator:
+                facility_id = coordinator["facility_id"]
+                time_row = await db.fetchrow(
+                    f"SELECT {shift_start_field}, {shift_end_field} FROM shifts WHERE facility_id = $1 AND role = $2",
+                    facility_id, nurse_type
+                )
+                if time_row and time_row[shift_start_field] and time_row[shift_end_field]:
+                    shift_start_time = time_row[shift_start_field]
+                    shift_end_time = time_row[shift_end_field]
+
+                    # Combine with today's date
+                    shift_start_dt = datetime.combine(today, shift_start_time)
+                    shift_end_dt = datetime.combine(today, shift_end_time)
+                    if shift_end_dt <= shift_start_dt:  # Overnight handling
+                        shift_end_dt += timedelta(days=1)
+
+                    if shift_start_dt <= now <= shift_end_dt:
+                        return False, (
+                            f"❌ Unable to delete {shift_type} shift on {convert_to_md(shift_date)} "
+                            f"because it is currently ongoing ({shift_start_time.strftime('%I:%M %p')} - {shift_end_time.strftime('%I:%M %p')})."
+                        )
+
+    return True, None
+
 
 # Delete shift by ID
 async def delete_shift(shift_id, created_by, nurse_id=None, nurse_type=None, shift_value=None, location=None, date=None, name=None):
@@ -80,6 +138,9 @@ async def handle_index_reply_for_shift_deletion(sender, text, db, cache):
             await cache.delete(sender + "_awaiting_shift_delete")
             return {"message": "❎ Deletion cancelled because no valid shift indexes were provided."}
 
+       # Convert to zero-based indexes
+        indexes = [int(i) - 1 for i in index_strs if i.isdigit()]  
+
         # ❌ No valid indexes at all
         if not indexes:
             return {"message": "❌ Please provide valid shift number(s) to delete."}
@@ -133,8 +194,18 @@ async def handle_deletion_confirmation(sender, text, db, cache):
         shifts = data.get("shifts", [])
         success = 0
         failed = 0
+        blocked = 0
+        blocked_msgs = []
 
+            # Try deleting
         for shift in shifts:
+            allowed, reason = await can_delete_shift(shift, sender, db)
+            print(allowed, reason, "Shift deletion permission check")
+            if not allowed:
+                blocked += 1
+                blocked_msgs.append(reason)
+                continue
+
             deleted = await delete_shift(shift["id"], sender)
             if deleted:
                 success += 1
@@ -150,13 +221,18 @@ async def handle_deletion_confirmation(sender, text, db, cache):
         if remaining_shifts:
             await cache.set(sender + "_awaiting_shift_delete", json.dumps({"shifts": remaining_shifts}))
 
-        # Build response
-        if success and not failed:
-            msg = f"✅ Deleted {success} shift(s) successfully."
-        elif success and failed:
-            msg = f"⚠️ Deleted {success} shift(s), but {failed} could not be deleted."
-        else:
-            msg = "❌ Failed to delete the selected shifts."
+        # Build result message
+        parts = []
+        if success:
+            parts.append(f"✅ Deleted {success} shift(s) successfully.")
+        if failed:
+            parts.append(f"⚠️ {failed} shift(s) could not be deleted.")
+        if blocked:
+            parts.append("\n".join(blocked_msgs))  # keep normal join here
+
+        final_message = "\n\n".join(parts)  # this controls section spacing
+        
+        msg = "\n".join(parts) if parts else "❌ No shifts were deleted."
 
         # ✅ Ask if they want to delete more (if shifts remain)
         if remaining_shifts:
@@ -233,11 +309,28 @@ async def handle_delete_all_shifts(sender, db):
         return {"message": "You don't have any upcoming shifts to delete."}
 
     deleted_ids = []
+    blocked_msgs = []
     for shift in shifts:
-        if await delete_shift(shift["id"], created_by=sender):
-            deleted_ids.append(shift["id"])
+        # We need the full shift details, not just ID
+        full_shift = await db.fetchrow("SELECT * FROM shift_tracker WHERE id = $1", shift["id"])
+        allowed, reason = await can_delete_shift(full_shift, sender, db)
+        if not allowed:
+            blocked_msgs.append(reason)
+            continue
 
-    return {
-        "message": f"✅ Deleted {len(deleted_ids)} shift(s) successfully.",
-        "deleted_shift_ids": deleted_ids
-    }
+        if await delete_shift(full_shift["id"], created_by=sender):
+            deleted_ids.append(full_shift["id"])
+
+      # Build message safely
+    msg_parts = []
+
+    if deleted_ids:
+        msg_parts.append(f"✅ Deleted {len(deleted_ids)} shift(s) successfully.")
+
+    if blocked_msgs:
+        msg_parts.extend(blocked_msgs)
+
+    if not msg_parts:
+        msg_parts.append("No shifts could be deleted.")
+
+    return {"message": "\n".join(msg_parts), "deleted_shift_ids": deleted_ids}
