@@ -72,11 +72,42 @@ async def can_delete_shift(shift, sender, db):
 # Delete shift by ID
 async def delete_shift(shift_id, created_by, nurse_id=None, nurse_type=None, shift_value=None, location=None, date=None, name=None):
     try:
+        # Fetch shift details before deletion
+        shift = await db.fetchrow("""
+            SELECT s.id, s.nurse_id, s.date, s.status, s.shift, s.nurse_type, n.mobile_number
+            FROM shift_tracker s
+            LEFT JOIN nurses n ON s.nurse_id = n.id
+            WHERE s.id = $1
+        """, shift_id)
+
+        if not shift:
+            return False
+
+        # Mark as deleted
         result = await db.execute("UPDATE shift_tracker SET is_deleted = TRUE WHERE id = $1", shift_id)
         if result == "UPDATE 0":
             return False
 
-        if nurse_id:
+        # Determine if this is a future filled shift
+        shift_date = shift["date"]
+        nurse_type = shift["nurse_type"]
+        shift_type = shift["shift"]
+
+        is_future_shift = shift_date >= datetime.now().date()
+
+        is_filled = shift["status"] == "filled"
+
+        if is_future_shift and is_filled and shift["mobile_number"]:
+            formatted_date = convert_to_md(normalize_date(shift_date))
+            nurse_message = (
+                f"Hello, the shift for {nurse_type} on {formatted_date} for {shift_type} "
+                f"shift has been deleted by the chatbot."
+            )
+
+            asyncio.create_task(send_message(shift["mobile_number"], nurse_message))
+
+        # Existing logic if nurse_id is passed explicitly
+        if nurse_id and not (is_future_shift and is_filled):
             nurse_data = await db.fetchrow("SELECT mobile_number FROM nurses WHERE id = $1", nurse_id)
             if nurse_data:
                 nurse_phone = nurse_data["mobile_number"]
