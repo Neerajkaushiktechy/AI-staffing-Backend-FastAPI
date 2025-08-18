@@ -1069,7 +1069,7 @@ async def admin_resend_shift_notification(request, response):
 
         await send_nurses_message(nurses, nurse_type, shift_time, shift_id, date, additional_instructions)
 
-        return {"message": f"Notification resent to {len(nurses)} {nurse_type} nurses"}
+        return {"status": 200, "message": f"Notification resent to {len(nurses)} {nurse_type} nurses"}
 
     except Exception as e:
         print("Unexpected error in resend notification:", e)

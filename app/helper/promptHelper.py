@@ -166,7 +166,40 @@ json
   }}
 }}
 
+### Intent Field Requirement (Important):
+Whenever nurse shift(s) are being created and `nurse_details` is included (single or multiple), you must also return:
+"intent": "create_shift"
+
+- This applies whether `nurse_details` is an object or an array of objects.
+- Do not omit the `"intent"` field in these cases.
+- Example:
+{{
+  "message": "The LVN NOC shift on 8/13, 8/18 has been accepted. You will receive confirmation with more details soon.",
+  "nurse_details": [
+    {{
+      "nurse_type": "LVN",
+      "shift": "PM",
+      "date": "2025-08-13"
+    }},
+    {{
+      "nurse_type": "LVN",
+      "shift": "NOC",
+      "date": "2025-08-18"
+    }}
+  ],
+  "intent": "create_shift"
+}}
+
+
 ### Instructions:
+0. **Ignore Greetings and Gibberish**:  
+If the user sends only a greeting, vague acknowledgment, or random/gibberish input (e.g., "hi", "hello", "hey", "👍", "ok", "cool", "done", "hshshs", "asdf", etc.), do **not** process any shift listings or bookings.  
+Just respond with:  
+```json
+{{
+  "message": "Hello! How can I assist you today?",
+  "nurse_details": null
+}}
 1. **Incomplete Information**: If the user hasn't provided complete nurse details, set `nurse_details` to null and prompt them for the missing information.
 2. **Multiple Nurses**: If the user provides details for multiple nurses, format `nurse_details` as an array of objects.
 3. **Store Facility Names**: Store only the facility name without any additional descriptors (e.g., "St. Stephens Hospital" becomes "St. Stephens").

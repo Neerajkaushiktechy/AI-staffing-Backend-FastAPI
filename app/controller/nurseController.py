@@ -66,7 +66,6 @@ async def search_nurses(nurse_type: str, shift: str, shift_id: int):
 
 async def send_nurses_message(nurses, nurse_type: str, shift: str, shift_id: int, date: str, additional_instructions: str):
     for nurse in nurses:
-        nurse_id = nurse["id"]
         phone_number = nurse["mobile_number"]
         print(f"Sending message to nurse: {phone_number}")
         nurse_availability = await check_nurse_availability(nurse["id"], shift_id)
@@ -99,7 +98,7 @@ async def send_nurses_message(nurses, nurse_type: str, shift: str, shift_id: int
             continue
 
         if ai_message:
-            await update_nurse_chat_history(nurse_id, ai_message, "sent")
+            await update_nurse_chat_history(phone_number, ai_message, "sent")
             asyncio.create_task(send_message(phone_number, ai_message)) 
 
 
@@ -169,24 +168,24 @@ async def check_nurse_availability(nurse_id: int, shift_id: int) -> tuple[bool, 
         print("Error occurred while checking nurse availability:", error)
         return False, "An internal error occurred while checking your availability."
 
-async def update_nurse_chat_history(nurse_id: int, text: str, msg_type: str) -> None:
+async def update_nurse_chat_history(sender: str, text: str, msg_type: str) -> None:
     try:
         await db.execute("""
             INSERT INTO nurse_chat_data
-            (nurse_id, message, message_type)
+            (mobile_number, message, message_type)
             VALUES ($1, $2, $3)
-        """, nurse_id, text, msg_type)
+        """, sender, text, msg_type)
     except Exception as err:
         print('Error updating nurse chat history:', err)
     
-async def get_nurse_chat_data(nurse_id: int) -> list[str]:
+async def get_nurse_chat_data(sender: str) -> list[str]:
     try:
         rows = await db.fetch("""
             SELECT message
             FROM nurse_chat_data
-            WHERE nurse_id = $1
+            WHERE mobile_number = $1
             LIMIT 50
-        """, nurse_id)
+        """, sender)
         return [row['message'] for row in rows]
     except Exception as error:
         print("Error getting nurse chat data:", error)
