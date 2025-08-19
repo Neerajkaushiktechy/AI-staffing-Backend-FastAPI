@@ -101,7 +101,7 @@ async def delete_shift(shift_id, created_by, nurse_id=None, nurse_type=None, shi
             formatted_date = convert_to_md(normalize_date(shift_date))
             nurse_message = (
                 f"Hello, the shift for {nurse_type} on {formatted_date} for {shift_type} "
-                f"shift has been deleted by the chatbot."
+                f"shift has been deleted by the Facility Coordinator."
             )
 
             asyncio.create_task(send_message(shift["mobile_number"], nurse_message))

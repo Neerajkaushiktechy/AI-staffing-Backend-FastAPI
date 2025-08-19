@@ -844,25 +844,22 @@ async def coordinator_chat_bot(sender,text):
             print("actual_shifts", actual_shifts)
             if actual_shifts:
               shift_list_lines = []
-              for s in actual_shifts:
+              status_icon = {"open": "🟢", "filled": "🔴"}              
+              for idx, s in enumerate(actual_shifts, start=1):
                     if requested_status and s['status'] != requested_status:
                         continue  # Skip non-matching shifts
                     formatted_date = datetime.strptime(s['date'], "%Y-%m-%d").strftime("%-m/%-d")
+                    status_text = status_icon.get(s['status'], "⚪")
                     if s['status'] == "filled" and s.get('nurse_name') and s.get('nurse_phone'):
-                        line = (
-                            f"- Date: {formatted_date}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, "
-                            f"Status: {s['status']}, Nurse: {s['nurse_name']} ({s['nurse_phone']})"
-                        )
+                        line = f"{idx}. {formatted_date} - {s['shift']} - {s['nurse_type']} - {s['nurse_name']} ({s['nurse_phone']}) {status_text} Filled"
                     else:
-                        line = (
-                            f"- Date: {formatted_date}, Shift: {s['shift']}, Nurse Type: {s['nurse_type']}, "
-                            f"Status: {s['status']}"
-                        )
+                        line = f"{idx}. {formatted_date} - {s['shift']} - {s['nurse_type']} - {status_text} Open"
+
                     shift_list_lines.append(line)  # <<-- This line must be inside the loop
 
-              response_text = "Here are the shifts that match your criteria:\n" + "\n".join(shift_list_lines)
+              response_text = "Here are the shifts that match your request 👇\n\n" + "\n".join(shift_list_lines)
             else:
-              response_text = "I couldn't find any shifts matching your criteria."
+              response_text = "I couldn’t find any shifts matching your request."
               reply_message["nurse_details"] = None
               reply_message["shift_information"] = None
 

@@ -823,7 +823,7 @@ async def nurse_chat_bot(sender, text):
                             nurse_t = detail.get("nurse_type", nurse_type)
 
                             formatted_items.append(
-                                f"{idx}. Date: {formatted_date}, Shift: {shift_val}, Nurse Type: {nurse_t}, Facility: \"{facility_name}\""
+                                f"{idx}️⃣  {formatted_date} – {shift_val} ({facility_name})"
                             )
                             shift_index_map[str(idx)] = {
                                 "date": detail["date"].strftime("%Y-%m-%d"),
@@ -833,10 +833,11 @@ async def nurse_chat_bot(sender, text):
                             }
                     if formatted_items:
                         msg_lines = [
-                            f"We found multiple shifts at {facility_name} that match your nurse type ({nurse_type}).",
-                            "Please choose one of the shifts below to confirm:",
+                            f"Thanks! Here are the available {nurse_type} shifts at {facility_name}:",
+                            "",  # 👈 adds spacing above shift listing
                             *formatted_items,
-                            "\nReply with the index of the shift you'd like to book."
+                            "",
+                            "👉 Reply with the number to grab your shift ✅"
                         ]
                         message = "\n".join(msg_lines)
 
