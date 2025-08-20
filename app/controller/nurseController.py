@@ -791,7 +791,7 @@ async def nurse_chat_bot(sender, text):
             dt = datetime.strptime(normalize_date(date_str), "%Y-%m-%d")
             return convert_to_md(dt)
         def sanitize_facility_name(name: str) -> str:
-            return name.strip().lower()
+            return name.strip()
 
         # Confirmation section (get shifts by facility, check validity, status, etc.)
         if reply_message.get("confirmation"):
@@ -821,9 +821,10 @@ async def nurse_chat_bot(sender, text):
                             formatted_date = format_date(detail["date"])
                             shift_val = detail["shift_value"]
                             nurse_t = detail.get("nurse_type", nurse_type)
+                            index_display = f"{idx}."
 
                             formatted_items.append(
-                                f"{idx}️⃣  {formatted_date} – {shift_val} ({facility_name})"
+                                f"{index_display}️ {formatted_date} – {shift_val} – {facility_name}"
                             )
                             shift_index_map[str(idx)] = {
                                 "date": detail["date"].strftime("%Y-%m-%d"),

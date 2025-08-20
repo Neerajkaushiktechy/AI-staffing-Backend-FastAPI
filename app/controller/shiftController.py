@@ -10,6 +10,8 @@ from fastapi import Request, Response, HTTPException, params
 from app.utils.serialize_row import serialize_row
 from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
 from app.utils.cache import cache
+from tzlocal import get_localzone
+from zoneinfo import ZoneInfo
 
 async def create_shift(
     created_by: str,
@@ -268,6 +270,13 @@ async def search_shifts_in_db(
         params.append(status)
         idx += 1
 
+        # Only for open shifts: exclude past dates
+        if status == "open":
+            today = datetime.now().date()
+            query += f" AND s.date >= ${idx}"
+            params.append(today)
+            idx += 1
+
     if start_date and end_date:
         sd = datetime.strptime(start_date, "%Y-%m-%d").date()
         ed = datetime.strptime(end_date,   "%Y-%m-%d").date()
@@ -462,7 +471,10 @@ async def check_shift_validity(shift_id: int, nurse_phone_number: str) -> bool:
 
     return True
 
-async def get_shift_id_by_name(facility_name: str, nurse_type: str, shift: str = None, sender: str = None):
+async def get_shift_id_by_name(facility_name: str, nurse_type: str, shift: str = None, sender: str = None, tz_name: str = "America/Los_Angeles"):
+    local_tz = ZoneInfo(tz_name)
+    now_in_tz = datetime.now(local_tz)
+    today_in_tz = now_in_tz.date()
     facility = await db.fetchrow("""
         SELECT id
         FROM facilities
@@ -487,10 +499,10 @@ async def get_shift_id_by_name(facility_name: str, nurse_type: str, shift: str =
               AND facility_id = $3
               AND status = 'open'
               AND nurse_id IS NULL
-              AND date >= CURRENT_DATE
+              AND date >= $4
               AND is_deleted = FALSE
         """
-        shift_rows = await db.fetch(query, nurse_type, shift, facility_id)
+        shift_rows = await db.fetch(query, nurse_type, shift, facility_id, today_in_tz)
     else:
         query = """
             SELECT id
@@ -499,10 +511,10 @@ async def get_shift_id_by_name(facility_name: str, nurse_type: str, shift: str =
               AND facility_id = $2
               AND status = 'open'
               AND nurse_id IS NULL
-              AND date >= CURRENT_DATE
+              AND date >= $3
               AND is_deleted = FALSE
         """
-        shift_rows = await db.fetch(query, nurse_type, facility_id)
+        shift_rows = await db.fetch(query, nurse_type, facility_id, today_in_tz)
 
     if len(shift_rows) == 1:
         return shift_rows[0]['id']  # Return single shift ID

@@ -130,13 +130,6 @@ async def handle_index_reply_for_shift_deletion(sender, text, db, cache):
 
     cleaned = text.strip().lower()
 
-    # Case: vague input
-    if cleaned in VAGUE:
-        await cache.delete(sender + "_awaiting_shift_delete")
-        return {
-            "message": "❎ Deletion cancelled."
-        }
-
     try:
         payload = json.loads(awaiting_raw)
         shifts = payload.get("shifts", [])
@@ -155,6 +148,17 @@ async def handle_index_reply_for_shift_deletion(sender, text, db, cache):
             elif cleaned == "no":
                 await cache.delete(sender + "_awaiting_shift_delete")
                 return {"message": "❎ Deletion cancelled."}
+
+        # ✅ Handle vague or nonsense input (only if not single)
+        if not any(ch.isdigit() for ch in cleaned):  # no numbers at all
+            vague_responses = ["yes", "no", "ok", "okay", "done", "cancel", "thank you", "thanks", "sure"]
+
+            if cleaned in vague_responses:
+                await cache.delete(sender + "_awaiting_shift_delete")
+                return {"message": "All set! Let me know if you need anything else 😊"}
+
+            await cache.delete(sender + "_awaiting_shift_delete")
+            return {"message": "⚠️ I couldn’t match your response to a shift number. Let’s start fresh if you’d like to try again."}
 
         # ✅ Extract all index numbers from the message
         index_strs = re.findall(r'\b\d+\b', cleaned)
@@ -186,8 +190,9 @@ async def handle_index_reply_for_shift_deletion(sender, text, db, cache):
 
         confirm_lines = ["Hey, just to confirm — you want me to remove these shifts, right?"]
         for idx, shift in enumerate(selected_shifts, start=1):
+            status_symbol = "●" if shift['status'].lower() == "filled" else "○"
             confirm_lines.append(
-                f"{idx}️⃣ {convert_to_md(shift['date'])} – {shift['shift']}, {shift['nurse_type']}, {shift['status'].capitalize()}"
+                f"{idx}. {convert_to_md(shift['date'])} - {shift['shift']} - {shift['nurse_type']} - {status_symbol} {shift['status'].capitalize()}"
             )
         confirm_lines.append("\nType 'yes' to delete or 'no' to keep them.")
 
@@ -277,8 +282,15 @@ async def handle_deletion_confirmation(sender, text, db, cache):
                 date = convert_to_md(s.get("date")) if s.get("date") else "Unknown date"
                 shift = s.get("shift", "Unknown shift")
                 nurse_type = s.get("nurse_type", "Unknown nurse type")
-                status = s.get("status", "Unknown status").capitalize()
-                lines.append(f"{i}. {date} – {shift}, {nurse_type}, {status}")
+                status = s.get("status", "Unknown status").lower()
+                # Use symbols for status
+                if status == "filled":
+                    status_display = "● Filled"
+                elif status == "open":
+                    status_display = "○ Open"
+                else:
+                    status_display = status.capitalize()
+                lines.append(f"{i}. {date} - {shift} - {nurse_type} - {status_display}")
             return {"message": "\n".join(lines)}
         else:
             return {"message": msg}

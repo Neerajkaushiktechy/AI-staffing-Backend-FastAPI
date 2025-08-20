@@ -535,9 +535,17 @@ async def coordinator_chat_bot(sender,text):
                     date = convert_to_md(s.get("date")) if s.get("date") else "Unknown date"
                     shift = s.get("shift", "Unknown shift")
                     nurse_type = s.get("nurse_type", "Unknown nurse type")
-                    status = s.get("status", "Unknown status").capitalize()
+                    nurse_name = s.get("nurse_name")
+                    nurse_phone = s.get("nurse_phone")
+                    status = s.get("status", "Unknown status").lower()
 
-                    response_lines.append(f"{idx}. {date} – {shift}, {nurse_type}, {status}")
+                    # format nurse info only if status is filled and nurse details exist
+                    if status == "filled" and nurse_name and nurse_phone:
+                        status_icon = "● Filled"
+                        response_lines.append(f"{idx}. {date} - {shift} - {nurse_type} - {status_icon}")
+                    else:
+                        status_icon = "○ Open" if status == "open" else f"● {status.capitalize()}"
+                        response_lines.append(f"{idx}. {date} - {shift} - {nurse_type} - {status_icon}")
                 response_lines.append("")
                 response_lines.append("💡 Reply with the *number* of the shift you’d like me to delete.")
                 return {"message": "\n".join(response_lines)}
@@ -800,9 +808,7 @@ async def coordinator_chat_bot(sender,text):
             requested_status = shift_info.get("status")
             requested_start_date = shift_info.get("start_date")
             requested_end_date = shift_info.get("end_date")
-            
             # today = datetime.today().date()
-             
             #  # Inject today's date if no date provided
             # if not requested_date and not requested_start_date and not requested_end_date:
             #     requested_start_date = today.isoformat()
@@ -844,7 +850,7 @@ async def coordinator_chat_bot(sender,text):
             print("actual_shifts", actual_shifts)
             if actual_shifts:
               shift_list_lines = []
-              status_icon = {"open": "🟢", "filled": "🔴"}              
+              status_icon = {"open": "○", "filled": "●"}
               for idx, s in enumerate(actual_shifts, start=1):
                     if requested_status and s['status'] != requested_status:
                         continue  # Skip non-matching shifts
