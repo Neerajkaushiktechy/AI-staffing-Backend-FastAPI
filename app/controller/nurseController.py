@@ -330,19 +330,75 @@ async def admin_add_nurse(request: Request, response: Response):
     try:
         email = data["email"]
         phone = data["phone"]
+        talent_id = str(data["talentId"])
 
         existing = await db.fetch("""
             SELECT * FROM nurses WHERE email ILIKE $1 OR mobile_number = $2
         """, email, phone)
 
         if existing:
+            email_conflict = any(row["email"].lower() == email.lower() for row in existing)
+            phone_conflict = any(row["mobile_number"] == phone for row in existing)
+
+            if email_conflict and phone_conflict:
+                message = "Nurse with this email and phone number already exists"
+            elif email_conflict:
+                message = "Nurse with this email already exists"
+            elif phone_conflict:
+                message = "Nurse with this phone number already exists"
+            else:
+                message = "Nurse already exists"
+
             return JSONResponse(
                 content={
-                    "message": "Nurse with this email or phone number already exists",
+                    "message": message,
                     "status": 400,
-                    "nurse": dict(existing[0])
                 },
-                status_code=200
+                status_code=400
+            )
+
+         # 🔹 Check in coordinator table as well
+        existing_coordinator = await db.fetch("""
+            SELECT * FROM coordinator WHERE coordinator_email ILIKE $1 OR coordinator_phone = $2
+        """, email, phone)
+
+        if existing_coordinator:
+            existing = dict(existing_coordinator[0])
+
+            phone_conflict = existing.get("coordinator_phone") == phone
+            email_conflict = existing.get("coordinator_email") == email
+
+            if phone_conflict and email_conflict:
+                message = "Email and mobile number already exist."
+            elif email_conflict:
+                message = "Email already exists."
+            elif phone_conflict:
+                message = "Mobile number already exists."
+            else:
+                message = "Coordinator already exists."
+
+            return JSONResponse(
+                content={
+                    "message": message,
+                    "status": 400,
+                    # "coordinator": existing
+                },
+                status_code=400
+            )
+        
+        # Minimum check (only talent_id)
+        existing_talent = await db.fetchval(
+            "SELECT talent_id FROM nurses WHERE talent_id = $1",
+            talent_id
+        )
+        if existing_talent:
+            return JSONResponse(
+                content={
+                    "message": f"Talent ID {talent_id} already exists",
+                    "status": 400,
+                    # "coordinator": existing_talent  # <-- fixed variable name
+                },
+                status_code=400
             )
 
         geo = await geo_lat_lng(data["location"])
@@ -398,9 +454,22 @@ async def admin_edit_nurse(request: Request, response: Response, id: int):
         if existing_conflict:
             return JSONResponse(
                 content={"message": "Nurse with this email or phone number already exists", "status": 400, "nurse": serialize_row(existing_conflict[0])},
-                status_code=200
+                status_code=400
             )
 
+        existing_coordinator = await db.fetch("""
+            SELECT * FROM coordinator
+            WHERE coordinator_email ILIKE $1
+        """, email)
+
+        if existing_coordinator:
+            return JSONResponse(
+                content={
+                    "message": "This email is already used by a coordinator",
+                    "status": 400
+                },
+                status_code=400
+            )
         # Check if location has changed
         existing_location = await db.fetchrow("""
             SELECT location FROM nurses WHERE id = $1
