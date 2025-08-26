@@ -444,6 +444,7 @@ async def admin_edit_nurse(request: Request, response: Response, id: int):
     try:
         email = data["email"]
         phone = data["phone"]
+        talent_id = str(data["talentId"])
 
         # Check for duplicate email or phone
         existing_conflict = await db.fetch("""
@@ -452,25 +453,60 @@ async def admin_edit_nurse(request: Request, response: Response, id: int):
         """, email, phone, id)
 
         if existing_conflict:
+            email_conflict = any(row["email"].lower() == email.lower() for row in existing_conflict)
+            phone_conflict = any(row["mobile_number"] == phone for row in existing_conflict)
+
+            if email_conflict and phone_conflict:
+                message = "Nurse with this email and phone number already exists"
+            elif email_conflict:
+                message = "Nurse with this email already exists"
+            elif phone_conflict:
+                message = "Nurse with this phone number already exists"
+            else:
+                message = "Nurse already exists"
+
             return JSONResponse(
-                content={"message": "Nurse with this email or phone number already exists", "status": 400, "nurse": serialize_row(existing_conflict[0])},
+                content={"message": message, "status": 400},
                 status_code=400
             )
 
+        # 🔹 Check in coordinator table (both email + phone)
         existing_coordinator = await db.fetch("""
             SELECT * FROM coordinator
-            WHERE coordinator_email ILIKE $1
-        """, email)
+            WHERE coordinator_email ILIKE $1 OR coordinator_phone = $2
+        """, email, phone)
 
         if existing_coordinator:
+            existing = dict(existing_coordinator[0])
+            phone_conflict = existing.get("coordinator_phone") == phone
+            email_conflict = existing.get("coordinator_email").lower() == email.lower()
+
+            if phone_conflict and email_conflict:
+                message = "This email and phone number are already used by a coordinator"
+            elif email_conflict:
+                message = "This email is already used by a coordinator"
+            elif phone_conflict:
+                message = "This phone number is already used by a coordinator"
+            else:
+                message = "Coordinator already exists"
+
             return JSONResponse(
-                content={
-                    "message": "This email is already used by a coordinator",
-                    "status": 400
-                },
+                content={"message": message, "status": 400},
                 status_code=400
             )
-        # Check if location has changed
+        # 🔹 Check for unique talent_id (excluding self)
+        existing_talent = await db.fetchval("""
+            SELECT talent_id FROM nurses 
+            WHERE talent_id = $1 AND id != $2
+        """, talent_id, id)
+
+        if existing_talent:
+            return JSONResponse(
+                content={"message": f"Talent ID {talent_id} already exists", "status": 400},
+                status_code=400
+            )
+
+        # 🔹 Check if location changed → update lat/lng
         existing_location = await db.fetchrow("""
             SELECT location FROM nurses WHERE id = $1
         """, id)
