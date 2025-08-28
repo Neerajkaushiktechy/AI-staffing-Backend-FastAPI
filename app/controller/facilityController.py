@@ -37,18 +37,109 @@ async def admin_add_facility(request: Request, response: Response):
 
         await conn.execute("BEGIN")
 
-        # Check for duplicate coordinator phone/email
-        for coordinator in coordinators:
-            phone = coordinator.get("phone")
-            email = coordinator.get("email")
-            exists = await conn.fetchrow("""
-                SELECT 1 FROM coordinator
-                WHERE coordinator_phone = $1 OR coordinator_email ILIKE $2
-            """, phone, email)
-            if exists:
-                await conn.execute("ROLLBACK")
-                return {"message": "Facility with this phone or email already exists", "status": 400}
+        # # Check for duplicate coordinator phone/email
+        # for coordinator in coordinators:
+        #     phone = coordinator.get("phone")
+        #     email = coordinator.get("email")
+        #     exists = await conn.fetchrow("""
+        #         SELECT 1 FROM coordinator
+        #         WHERE coordinator_phone = $1 OR coordinator_email ILIKE $2
+        #     """, phone, email)
+        #     if exists:
+        #         await conn.execute("ROLLBACK")
+        #         return {"message": "Facility with this phone or email already exists", "status": 400}
 
+        # ✅ Step 1: Check for duplicate coordinator email/phone in request
+        seen_phones = set()
+        seen_emails = set()
+        errors = []
+
+
+        # ✅ Step 1: Check duplicates within the request itself
+        for idx, coordinator in enumerate(coordinators, start=1):
+            phone = (coordinator.get("phone") or "").strip()
+            email = (coordinator.get("email") or "").strip().lower()
+
+            if email in seen_emails:
+                await conn.execute("ROLLBACK")
+                return JSONResponse(
+                    content={"message": f"Coordinator's Email already exists in records", "status": 400},
+                    status_code=400
+                )
+            seen_emails.add(email)
+
+            if phone in seen_phones:
+                await conn.execute("ROLLBACK")
+                return JSONResponse(
+                    content={"message": f"Coordinator's Phone Number already exists in records", "status": 400},
+                    status_code=400
+                )
+            seen_phones.add(phone)
+
+        # STOP here if duplicates found
+        if errors:
+            return JSONResponse(
+                content={"message": " & ".join(errors) + ". Coordinators must have unique email and phone number.",
+                "status": 400},
+                status_code=400
+            )
+
+
+        # ✅ Step 2 & 3: Check against DB (coordinators + nurses)
+        for idx, coordinator in enumerate(coordinators, start=1):
+            phone = (coordinator.get("phone") or "").strip()
+            email = (coordinator.get("email") or "").strip().lower()
+
+        # check coordinator table
+        coord_email_check = await conn.fetchval(
+            "SELECT 1 FROM coordinator WHERE LOWER(coordinator_email) = $1 AND is_deleted = FALSE",
+            email
+        )
+        coord_phone_check = await conn.fetchval(
+            "SELECT 1 FROM coordinator WHERE coordinator_phone = $1 AND is_deleted = FALSE",
+            phone
+        )
+
+        # Check coordinator table
+        coord_email_check = await conn.fetchval(
+            "SELECT 1 FROM coordinator WHERE LOWER(coordinator_email) = $1 AND is_deleted = FALSE",
+            email
+        )
+        coord_phone_check = await conn.fetchval(
+            "SELECT 1 FROM coordinator WHERE coordinator_phone = $1 AND is_deleted = FALSE",
+            phone
+        )
+
+        if coord_email_check and coord_phone_check:
+            errors.append(f"Email and Phone Number already used by another coordinator")
+        elif coord_email_check:
+            errors.append(f"Email already used by another coordinator")
+        elif coord_phone_check:
+            errors.append(f"Phone Number already used by another coordinator")
+
+        # Check nurse table
+        nurse_email_check = await conn.fetchval(
+            "SELECT 1 FROM nurses WHERE LOWER(email) = $1 AND is_deleted = FALSE",
+            email
+        )
+        nurse_phone_check = await conn.fetchval(
+            "SELECT 1 FROM nurses WHERE mobile_number = $1 AND is_deleted = FALSE",
+        phone
+        )
+
+        if nurse_email_check and nurse_phone_check:
+            errors.append(f"Email and Phone Number already used by another nurse")
+        elif nurse_email_check:
+            errors.append(f"Email already used by another nurse")
+        elif nurse_phone_check:
+            errors.append(f"Phone Number already used by another nurse")
+
+        if errors:
+            return JSONResponse(
+                content={"message": " & ".join(errors),
+                "status": 400},
+                status_code=400
+            )   
         geo = await geo_lat_lng(cityStateZip)
         lat, lng = geo.get("lat"), geo.get("lng")
 
@@ -134,15 +225,105 @@ async def admin_edit_facility(request: Request, response: Response, facility_id:
 
         await conn.execute("BEGIN")
 
-        # Check for duplicate coordinator phone/email
+        # # Check for duplicate coordinator phone/email
+        # for coordinator in coordinators:
+        #     check = await conn.fetchrow("""
+        #         SELECT 1 FROM coordinator
+        #         WHERE (coordinator_phone = $1 OR coordinator_email ILIKE $2) AND id != $3
+        #     """, coordinator["phone"], coordinator["email"], coordinator.get("id"))
+        #     if check:
+        #         await conn.execute("ROLLBACK")
+        #         return {"message": "Facility with this phone number or email already exists", "status": 400}
+
+        # ✅ Step 1: Check for duplicate coordinator email/phone in request
+        seen_phones = set()
+        seen_emails = set()
+        step1_errors = []
+
         for coordinator in coordinators:
-            check = await conn.fetchrow("""
-                SELECT 1 FROM coordinator
-                WHERE (coordinator_phone = $1 OR coordinator_email ILIKE $2) AND id != $3
-            """, coordinator["phone"], coordinator["email"], coordinator.get("id"))
-            if check:
-                await conn.execute("ROLLBACK")
-                return {"message": "Facility with this phone number or email already exists", "status": 400}
+            phone = coordinator.get("phone")
+            email = coordinator.get("email", "").lower()
+
+        if email in seen_emails:
+            step1_errors.append(f"Email is duplicated in the request")
+        else:
+            seen_emails.add(email)
+
+        if phone in seen_phones:
+            step1_errors.append(f"Phone Number is duplicated in the request")
+        else:
+            seen_phones.add(phone)
+
+        if step1_errors:
+            return JSONResponse(
+                content={"message": " & ".join(step1_errors), "status": 400},
+                status_code=400
+            )
+
+        # ✅ Step 2: Check for conflicts with coordinator table
+        step2_errors = []
+
+        for coordinator in coordinators:
+            phone = coordinator["phone"]
+            email = coordinator["email"].lower()
+            coord_id = coordinator.get("id")
+
+        # Check email conflict
+        email_query = "SELECT 1 FROM coordinator WHERE LOWER(coordinator_email) = $1 AND is_deleted = FALSE"
+        email_exists = await conn.fetchval(
+            email_query + (" AND id != $2" if coord_id else ""), 
+            email, coord_id
+        ) if coord_id else await conn.fetchval(email_query, email)
+
+    # Check phone conflict
+        phone_query = "SELECT 1 FROM coordinator WHERE coordinator_phone = $1 AND is_deleted = FALSE"
+        phone_exists = await conn.fetchval(
+            phone_query + (" AND id != $2" if coord_id else ""), 
+            phone, coord_id
+        ) if coord_id else await conn.fetchval(phone_query, phone)
+
+        # Handle combined & individual errors
+        if email_exists and phone_exists:
+            step2_errors.append("Email and Phone Number is already used by another coordinator")
+        elif email_exists:
+            step2_errors.append("Email is already used by another coordinator")
+        elif phone_exists:
+            step2_errors.append("Phone Number is already used by another coordinator")
+
+        if step2_errors:
+            return JSONResponse(
+                content={"message": " & ".join(step2_errors), "status": 400},
+                status_code=400
+            )
+
+
+        # ✅ Step 3: Check for conflicts with nurse table
+        step3_errors = []
+
+        for coordinator in coordinators:
+            phone = coordinator["phone"]
+            email = coordinator["email"].lower()
+
+        nurse_email_check = await conn.fetchval(
+            "SELECT 1 FROM nurses WHERE LOWER(email) = $1 AND is_deleted = FALSE", email
+        )
+        nurse_phone_check = await conn.fetchval(
+            "SELECT 1 FROM nurses WHERE mobile_number = $1 AND is_deleted = FALSE", phone
+        )
+
+        # Build combined error message
+        if nurse_email_check and nurse_phone_check:
+            step3_errors.append("Email and Phone Number are already used by another nurse")
+        elif nurse_email_check:
+            step3_errors.append("Email is already used by another nurse")
+        elif nurse_phone_check:
+            step3_errors.append("Phone Number is already used by another nurse")
+
+        if step3_errors:
+            return JSONResponse(
+            content={"message": " & ".join(step3_errors), "status": 400},
+            status_code=400
+        )
 
         # Check if cityStateZip has changed → update lat/lng
         existing = await conn.fetchrow("SELECT city_state_zip FROM facilities WHERE id = $1", facility_id)
@@ -211,23 +392,77 @@ async def admin_edit_facility(request: Request, response: Response, facility_id:
                 """, *shift_params)
 
         # Update or insert coordinators
+        # for coordinator in coordinators:
+        #     if coordinator.get("id"):
+        #         await conn.execute("""
+        #             UPDATE coordinator
+        #             SET coordinator_first_name = $2, coordinator_last_name = $3,
+        #                 coordinator_phone = $4, coordinator_email = $5
+        #             WHERE id = $1
+        #         """, coordinator["id"], coordinator["firstName"], coordinator["lastName"],
+        #              coordinator["phone"], coordinator["email"])
+        #     else:
+        #         await conn.execute("""
+        #             INSERT INTO coordinator (
+        #                 facility_id, coordinator_first_name, coordinator_last_name,
+        #                 coordinator_phone, coordinator_email
+        #             ) VALUES ($1, $2, $3, $4, $5)
+        #         """, facility_id, coordinator["firstName"], coordinator["lastName"],
+        #              coordinator["phone"], coordinator["email"])
         for coordinator in coordinators:
+            phone = coordinator["phone"]
+            email = coordinator["email"].lower()
+
             if coordinator.get("id"):
+                # 🔎 Check conflicts before update
+                conflict = await conn.fetchrow("""
+                    SELECT id FROM coordinator
+                    WHERE (coordinator_phone = $1 OR LOWER(coordinator_email) = $2)
+                    AND is_deleted = FALSE
+                    AND id != $3
+                """, phone, email, coordinator["id"])
+
+                if conflict:
+                    await conn.execute("ROLLBACK")
+                    return JSONResponse(
+                        content={"message": "Phone or Email already exists for another coordinator", "status": 400},
+                        status_code=400
+                    )
+
+                # Safe update
                 await conn.execute("""
                     UPDATE coordinator
                     SET coordinator_first_name = $2, coordinator_last_name = $3,
                         coordinator_phone = $4, coordinator_email = $5
                     WHERE id = $1
-                """, coordinator["id"], coordinator["firstName"], coordinator["lastName"],
-                     coordinator["phone"], coordinator["email"])
+                """, coordinator["id"], coordinator["firstName"], coordinator["lastName"], phone, email)
+
             else:
-                await conn.execute("""
-                    INSERT INTO coordinator (
-                        facility_id, coordinator_first_name, coordinator_last_name,
-                        coordinator_phone, coordinator_email
-                    ) VALUES ($1, $2, $3, $4, $5)
-                """, facility_id, coordinator["firstName"], coordinator["lastName"],
-                     coordinator["phone"], coordinator["email"])
+                # Insert (with check for re-activation of soft deleted coordinator)
+                existing_id = await conn.fetchval("""
+                    SELECT id FROM coordinator
+                    WHERE (coordinator_phone = $1 OR LOWER(coordinator_email) = $2)
+                """, phone, email)
+
+                if existing_id:
+                    # Reactivate (even if currently deleted)
+                    await conn.execute("""
+                        UPDATE coordinator
+                        SET is_deleted = FALSE,
+                            coordinator_first_name = $2,
+                            coordinator_last_name = $3,
+                            coordinator_phone = $4,
+                            coordinator_email = $5
+                        WHERE id = $1
+                    """, existing_id, coordinator["firstName"], coordinator["lastName"], phone, email)
+                else:
+                    # Safe insert
+                    await conn.execute("""
+                        INSERT INTO coordinator (
+                            facility_id, coordinator_first_name, coordinator_last_name,
+                            coordinator_phone, coordinator_email
+                        ) VALUES ($1, $2, $3, $4, $5)
+                    """, facility_id, coordinator["firstName"], coordinator["lastName"], phone, email)
 
         await conn.execute("COMMIT")
         return {"message": "Facility edited successfully", "status": 200}
@@ -253,10 +488,11 @@ async def admin_get_facilities(request: Request, response: Response):
 
         base_query = """
             FROM facilities
+            WHERE is_deleted = false
         """
         if search_term:
             base_query += """
-                WHERE name ILIKE $1 OR city_state_zip ILIKE $1 OR address ILIKE $1
+                AND (name ILIKE $1 OR city_state_zip ILIKE $1 OR address ILIKE $1)
             """
 
         if no_pagination:
@@ -302,7 +538,7 @@ async def admin_get_facility_by_id(request: Request, response: Response, id: int
             raise HTTPException(status_code=404, detail="Facility not found")
 
         shifts = await db.fetch("SELECT * FROM shifts WHERE facility_id = $1", id)
-        coordinators = await db.fetch("SELECT * FROM coordinator WHERE facility_id = $1", id)
+        coordinators = await db.fetch("SELECT * FROM coordinator WHERE facility_id = $1 AND is_deleted = false", id)
 
         return JSONResponse(content={
             "facilities": serialize_row(facility),
@@ -316,7 +552,7 @@ async def admin_get_facility_by_id(request: Request, response: Response, id: int
 
 async def admin_delete_facility(request: Request, response: Response, id: int):
     try:
-        await db.execute("DELETE FROM facilities WHERE id = $1", id)
+        await db.execute("UPDATE facilities SET is_deleted = true WHERE id = $1", id)
         return JSONResponse(content={"message": "Facility deleted successfully", "status": 200})
     except Exception as e:
         print("Error deleting facility:", e)

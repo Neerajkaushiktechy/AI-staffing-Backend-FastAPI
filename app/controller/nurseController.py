@@ -35,8 +35,11 @@ async def search_nurses(nurse_type: str, shift: str, shift_id: int):
         facility_id = shift_row["facility_id"]
 
         # Get facility location
+        # facility = await db.fetchrow(
+        #     "SELECT lat, lng FROM facilities WHERE id = $1", facility_id
+        # )
         facility = await db.fetchrow(
-            "SELECT lat, lng FROM facilities WHERE id = $1", facility_id
+            "SELECT lat, lng FROM facilities WHERE id = $1 AND is_deleted = false", facility_id
         )
         if not facility or not facility["lat"] or not facility["lng"]:
             raise ValueError("Facility does not have valid coordinates.")
@@ -121,7 +124,7 @@ async def check_nurse_availability(nurse_id: int, shift_id: int) -> tuple[bool, 
         nurse = await db.fetchrow("""
             SELECT nurse_type
             FROM nurses
-            WHERE id = $1
+            WHERE id = $1 AND is_deleted = false
         """, nurse_id)
 
         if not nurse:
@@ -220,7 +223,7 @@ async def follow_up_reply(sender: str, message: str) -> dict:
         coordinator = await db.fetchrow("""
             SELECT coordinator_email, coordinator_phone
             FROM coordinator
-            WHERE id = $1
+            WHERE id = $1 AND is_deleted = false
         """, coordinator_id)
         if not coordinator:
             raise ValueError("Coordinator not found.")
@@ -275,7 +278,7 @@ async def admin_get_nurses(request: Request, response: Response):
         base_query = "SELECT * FROM nurses"
         count_query = "SELECT COUNT(*) FROM nurses"
         query_params = []
-        conditions = []
+        conditions = ["is_deleted = FALSE"]  # 👈 exclude deleted nurses
 
         if search:
             conditions.append("""
@@ -294,7 +297,7 @@ async def admin_get_nurses(request: Request, response: Response):
         query_params += [limit, offset]
 
         # Total count
-        count_result = await conn.fetchrow(count_query, *query_params[:1] if conditions else [])
+        count_result = await conn.fetchrow(count_query, *query_params if search else [])
         total = int(count_result["count"])
 
         # Data
@@ -537,7 +540,8 @@ async def admin_edit_nurse(request: Request, response: Response, id: int):
 async def admin_delete_nurse(request: Request, response: Response, id: int):
     try:
         await db.execute("""
-            DELETE FROM nurses
+            UPDATE nurses
+            SET is_deleted = TRUE
             WHERE id = $1
         """, id)
         return JSONResponse(content={"message": "Nurse deleted successfully", "status": 200}, status_code=200)
@@ -577,6 +581,7 @@ async def admin_get_available_nurses(request: Request, response: Response):
             SELECT * FROM nurses n
             WHERE nurse_type ILIKE $1
               AND shift ILIKE $2
+              AND is_deleted = false
               AND lat IS NOT NULL AND lng IS NOT NULL
               AND (
                 3959 * acos(
@@ -600,6 +605,7 @@ async def admin_get_available_nurses(request: Request, response: Response):
             LEFT JOIN shift_tracker st ON n.id = st.nurse_id AND st.date = $2
             WHERE n.id = ANY($1::int[])
             AND st.nurse_id IS NULL
+            AND n.is_deleted = false
         """, nurse_ids, date)
 
         print("AVAILABLE NURSES", available_nurses)

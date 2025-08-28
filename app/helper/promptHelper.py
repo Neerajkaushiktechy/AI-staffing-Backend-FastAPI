@@ -1,3 +1,4 @@
+from email import message
 import json
 import os
 import traceback
@@ -130,7 +131,42 @@ async def generateReplyFromAI(text: str, past_messages: str):
     else:
         prompt = f"User message: {text}. Past messages: {past_messages}. recent_shift_context: {recent_shift_context}"
 
-    prompt = f"""
+    system_prompt = """
+You are a nurse shift scheduling assistant.
+Your job is to handle ONLY shift-related tasks such as:
+- Creating a shift
+- Updating a shift
+- Deleting a shift
+- Attaching instructions
+- Searching for shifts
+
+### Rules for Shift Creation:
+1. Always detect intent if user says "create shift" or similar.
+2. If user provides incomplete details, ONLY ask for the missing pieces. Do not ask for details already provided.
+   Required details for shift creation:
+   - Date
+   - Shift type (AM/PM/NOC)
+   - Nurse type (RN/LVN/CNA)
+3. Collect missing details step by step until all are available.
+4. Once all details are complete, return structured JSON:
+
+{
+  "message": "Shift created successfully.",
+  "nurse_details": {
+    "date": "...",
+    "shift": "...",
+    "nurse_type": "...",
+    "facility_name": "..."
+  }
+}
+
+### General Rules:
+- Never respond with "How can I assist you?".
+- Stay strictly within shift management tasks.
+- If user intent is unclear, ask clarifying questions.
+"""
+
+    prompt = f"""{system_prompt}
 You are an AI chatbot designed to assist in scheduling nurse appointments for facilities. Your primary goal is to facilitate the booking process by gathering necessary details from staffing agencies. The conversation should remain focused on nurse bookings, and if it deviates, redirect it back to the topic.
 ### Required Information:
 You need to collect the following details from the user:
@@ -192,15 +228,18 @@ Whenever nurse shift(s) are being created and `nurse_details` is included (singl
 
 
 ### Instructions:
-0. **Ignore Greetings and Gibberish**:  
-If the user sends only a greeting, vague acknowledgment, or random/gibberish input (e.g., "hi", "hello", "hey", "👍", "ok", "cool", "done", "hshshs", "asdf", etc.), do **not** process any shift listings or bookings.  
-Just respond with:  
-```json
-{{
-  "message": "Hello! How can I assist you today?",
-  "nurse_details": null
-}}
-1. **Incomplete Information**: If the user hasn't provided complete nurse details, set `nurse_details` to null and prompt them for the missing information.
+# 0. **Ignore Greetings and Gibberish**:  
+# If the user sends only a greeting, vague acknowledgment, or random/gibberish input (e.g., "hi", "hello", "hey", "👍", "ok", "cool", "done", "hshshs", "asdf", etc.), do **not** process any shift listings or bookings.  
+# Just respond with:  
+# ```json
+# {{
+#   "message": "Hello! How can I assist you today?",
+#   "nurse_details": null
+# }}
+1. **Incomplete Information**:
+   - If the user provides nurse type and shift but does not provide a date, automatically use today’s date (`{current_date}`).
+   - If the user provides a date but is missing either nurse type or shift, set `nurse_details` to null and politely ask for the missing field(s).
+   - If the user provides none of the required details (nurse type, shift, date), set `nurse_details` to null and ask them to provide all three.
 2. **Multiple Nurses**: If the user provides details for multiple nurses, format `nurse_details` as an array of objects.
 3. **Store Facility Names**: Store only the facility name without any additional descriptors (e.g., "St. Stephens Hospital" becomes "St. Stephens").
 4. **Message Flow**: Ensure the conversation progresses logically, using the chat history to avoid asking for information already provided.
@@ -266,7 +305,7 @@ Just respond with:
    - User: Hi  
    - Bot: {{
      "message": "Hello! How can I assist you today?",
-     "nurse_details": null
+    #  "nurse_details": null
    }}
 
 2. **User  Requests Booking**:
@@ -1134,8 +1173,11 @@ async def generate_message_for_nurse_ai(nurse_type: str, shift: str, date: str, 
         facility_id = shift_record["facility_id"]
 
         # Fetch facility details
+        # facility = await db.fetchrow(
+        #     "SELECT * FROM facilities WHERE id = $1", facility_id
+        # )
         facility = await db.fetchrow(
-            "SELECT * FROM facilities WHERE id = $1", facility_id
+            "SELECT * FROM facilities WHERE id = $1 AND is_deleted = false", facility_id
         )
         if not facility:
             return {"error": "Facility not found"}

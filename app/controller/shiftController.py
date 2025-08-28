@@ -12,6 +12,7 @@ from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
 from app.utils.cache import cache
 from tzlocal import get_localzone
 from zoneinfo import ZoneInfo
+from app.utils.convert_date import extract_date_from_text,normalize_to_date
 
 async def create_shift(
     created_by: str,
@@ -24,7 +25,7 @@ async def create_shift(
 ):
     try:
         # Convert and validate date
-        shift_date = datetime.strptime(shift_date_str, "%Y-%m-%d").date()
+        shift_date = normalize_to_date(shift_date_str)
         today = dt_date.today()
 
         if shift_date < today:
@@ -34,7 +35,8 @@ async def create_shift(
         facility = await db.fetchrow("""
             SELECT facility_id, id
             FROM coordinator
-            WHERE coordinator_phone = $1 OR coordinator_email = $1
+            WHERE (coordinator_phone = $1 OR coordinator_email = $1)
+            AND is_deleted = false
         """, created_by)
 
         facility_id = facility["facility_id"]
@@ -86,7 +88,7 @@ async def search_shift(nurse_type, shift, date, created_by):
         facility = await db.fetchrow("""
             SELECT facility_id 
             FROM coordinator 
-            WHERE coordinator_phone = $1 OR coordinator_email = $1
+            WHERE (coordinator_phone = $1 OR coordinator_email = $1) AND is_deleted = false
         """, created_by)
         
         if not facility:
@@ -240,7 +242,7 @@ async def search_shifts_in_db(
 
     # 1) Restrict to this coordinator's facility
     coord = await db.fetchrow(
-        "SELECT facility_id FROM coordinator WHERE coordinator_phone = $1 OR coordinator_email = $1",
+        "SELECT facility_id FROM coordinator WHERE (coordinator_phone = $1 OR coordinator_email = $1) AND is_deleted = false",
         sender_phone
     )
     if coord:
@@ -667,6 +669,40 @@ async def admin_get_shifts(request: Request, response: Response):
         print("Error fetching shifts:", err)
         return JSONResponse(content={"error": "Failed to fetch shifts"}, status_code=500)
 
+async def get_conversation_state(sender, db):
+    row = await db.fetchrow("""
+        SELECT nurse_type, shift, date
+        FROM incomplete_shift_info
+        WHERE sender=$1
+    """, sender)
+
+    if row:
+        return {
+            "nurse_type": row["nurse_type"],
+            "shift": row["shift"],
+            "date": row["date"].isoformat() if row["date"] else None
+        }
+    return {}
+
+async def update_conversation_state(sender, db, updates: dict):
+    date_val = updates.get("date")
+    if date_val:
+        # Make sure date_val is a datetime.date object
+        # If it's a string, convert it to datetime.date
+        if isinstance(date_val, str):
+            date_val = normalize_to_date(date_val)
+        # else assume it is already a datetime.date
+
+    await db.execute("""
+        INSERT INTO incomplete_shift_info (sender, nurse_type, shift, date)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (sender) DO UPDATE
+        SET nurse_type = COALESCE(EXCLUDED.nurse_type, incomplete_shift_info.nurse_type),
+            shift = COALESCE(EXCLUDED.shift, incomplete_shift_info.shift),
+            date = COALESCE(EXCLUDED.date, incomplete_shift_info.date),
+            created_at = NOW()
+    """, sender, updates.get("nurse_type"), updates.get("shift"), date_val)
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from typing import Optional
@@ -910,7 +946,7 @@ async def admin_add_shift(request: Request, response: Response):
 
         # Fetch coordinator details
         coordinator_details = await db.fetchrow("""
-            SELECT * FROM coordinator WHERE id = $1
+            SELECT * FROM coordinator WHERE id = $1 AND is_deleted = false
         """, coordinator)
 
         coordinator_phone = coordinator_details["coordinator_phone"] if coordinator_details else ""

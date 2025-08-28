@@ -14,7 +14,7 @@ from app.utils.serialize_row import serialize_row
 from fastapi.responses import JSONResponse
 from app.utils.convert_mm_dd_yyyy_to_mm_dd import convert_to_md
 from datetime import datetime
-from app.utils.convert_date import extract_date_from_text
+from app.utils.convert_date import extract_date_from_text,normalize_to_date
 from datetime import datetime, timedelta
 
 async def update_coordinator(shift_id: int, nurse_phone_number: str):
@@ -92,7 +92,7 @@ async def get_coordinator_number(shift_id: int):
         coordinator_query = """
             SELECT coordinator_phone, coordinator_email
             FROM coordinator
-            WHERE id = $1
+            WHERE id = $1 AND is_deleted = false
         """
         coordinator_row = await db.fetchrow(coordinator_query, coordinator_id)
 
@@ -112,7 +112,12 @@ async def get_shift_information(shift_id: int):
         facility_query = """
             SELECT city_state_zip, name
             FROM facilities
-            WHERE id = (SELECT facility_id FROM shift_tracker WHERE id = $1)
+            WHERE id = (
+                SELECT facility_id 
+                FROM shift_tracker 
+                WHERE id = $1 AND is_deleted = FALSE
+            )
+            AND is_deleted = FALSE
         """
         facility = await db.fetchrow(facility_query, shift_id)
         location = facility["city_state_zip"] if facility and "city_state_zip" in facility else ""
@@ -170,7 +175,8 @@ async def validate_shift_before_cancellation(shift_id: int, phone_number: str) -
         coordinator_query = """
             SELECT facility_id
             FROM coordinator
-            WHERE coordinator_phone = $1 OR coordinator_email = $1
+            WHERE (coordinator_phone = $1 OR coordinator_email = $1)
+              AND is_deleted = false
         """
         coordinator = await db.fetchrow(coordinator_query, phone_number)
         if not coordinator:
@@ -183,7 +189,7 @@ async def validate_shift_before_cancellation(shift_id: int, phone_number: str) -
         shift_query = """
             SELECT facility_id
             FROM shift_tracker
-            WHERE id = $1
+            WHERE id = $1 AND is_deleted = false
         """
         shift = await db.fetchrow(shift_query, shift_id)
 
@@ -219,7 +225,8 @@ async def check_nurse_type(sender: str, nurse_type: str) -> bool:
         facility_query = """
             SELECT facility_id
             FROM coordinator 
-            WHERE coordinator_phone = $1 OR coordinator_email = $1
+            WHERE (coordinator_phone = $1 OR coordinator_email = $1)
+              AND is_deleted = false
         """
         facility = await db.fetchrow(facility_query, sender)
         if not facility:
@@ -247,7 +254,8 @@ async def follow_up_message_send(sender: str, nurse_name_input: str, follow_up_m
         coordinator_query = """
             SELECT id
             FROM coordinator
-            WHERE coordinator_phone = $1 OR coordinator_email = $1
+            WHERE (coordinator_phone = $1 OR coordinator_email = $1)
+            AND is_deleted = false
         """
         coordinator = await db.fetchrow(coordinator_query, sender)
         if not coordinator:
@@ -326,7 +334,7 @@ async def follow_up_message_send(sender: str, nurse_name_input: str, follow_up_m
 async def admin_get_coordinators_by_facility(request: Request, response: Response, id: int):
     try:
         rows = await db.fetch("""
-            SELECT * FROM coordinator WHERE facility_id = $1
+            SELECT * FROM coordinator WHERE facility_id = $1 AND is_deleted = FALSE
         """, id)
         return JSONResponse(content={"coordinators": [serialize_row(row) for row in rows], "status": 200})
     except Exception as e:
@@ -336,7 +344,7 @@ async def admin_get_coordinators_by_facility(request: Request, response: Respons
 async def admin_get_coordinator_by_id(request: Request, response: Response, id: int):
     try:
         row = await db.fetchrow("""
-            SELECT * FROM coordinator WHERE id = $1
+            SELECT * FROM coordinator WHERE id = $1 AND is_deleted = FALSE
         """, id)
         return JSONResponse(content={"coordinatorData": [serialize_row(row)], "status": 200})
     except Exception as e:
@@ -346,7 +354,9 @@ async def admin_get_coordinator_by_id(request: Request, response: Response, id: 
 async def admin_delete_coordinator(request: Request, response: Response, id: int):
     try:
         await db.execute("""
-            DELETE FROM coordinator WHERE id = $1
+            UPDATE coordinator
+            SET is_deleted = TRUE
+            WHERE id = $1
         """, id)
         return JSONResponse(content={"message": "Coordinator deleted successfully", "status": 200})
     except Exception as e:
@@ -364,7 +374,7 @@ async def send_shift_information_to_coordinator(sender: str, shift_info: dict):
 
         # Get coordinator ID
         coordinator_row = await db.fetchrow("""
-            SELECT id FROM coordinator WHERE coordinator_phone = $1 OR coordinator_email = $1
+            SELECT id FROM coordinator WHERE (coordinator_phone = $1 OR coordinator_email = $1) AND is_deleted = false
 """, sender)
 
         if not coordinator_row:
@@ -419,11 +429,15 @@ async def send_shift_information_to_coordinator(sender: str, shift_info: dict):
         raise HTTPException(status_code=500, detail="An error has occurred while processing your request.")
 
 
+def is_greeting(text):
+    greetings = ["hi", "hello", "hey", "hii", "heyy", "yo", "sup", "good morning", "good evening", "how are you", "gm", "ge"]
+    cleaned = text.strip().lower()
+    return any(cleaned.startswith(greet) for greet in greetings)
 
 async def coordinator_chat_bot(sender,text):
     from app.helper.promptHelper import generateReplyFromAI
     from app.controller.nurseController import search_nurses, send_nurses_message
-    from app.controller.shiftController import create_shift, search_shift, search_shift_by_id, delete_shift, search_shifts_in_db
+    from app.controller.shiftController import create_shift, search_shift, search_shift_by_id, delete_shift, search_shifts_in_db,update_conversation_state,get_conversation_state
     from app.controller.instructionController import handle_instruction_update_request, handle_index_reply_for_instruction, handle_instruction_text_reply, handle_shift_field_update_text  # ✅ imported new functions
     from app.controller.shiftDeletionHandler import (
     handle_index_reply_for_shift_deletion,
@@ -559,6 +573,70 @@ async def coordinator_chat_bot(sender,text):
         if reply_message.get("instruction_update_request"):
             return await handle_instruction_update_request(sender, reply_message["instruction_update_request"], db, cache)
 
+        if is_greeting(text):
+            return {
+                "message": "Hello! How can I assist you today?",
+                "nurse_details": None
+            }
+        # Step A: Load partial state if exists
+        # 
+        if not reply_message.get("nurse_details") and not reply_message.get("intent") == "create_shift":
+            incomplete = await get_conversation_state(sender, db)
+
+            # ✅ Detect if the user is in a partially filled state
+            has_partial_info = incomplete.get("nurse_type") or incomplete.get("shift") or incomplete.get("date")
+
+            # ✅ Check for valid inputs
+            VALID_INPUTS = ["CNA", "LVN", "RN", "AM", "PM", "NOC"]
+            date_candidate = extract_date_from_text(text)
+
+            # ❌ If ambiguous or irrelevant message is sent during incomplete state, reset
+            if (
+                has_partial_info and
+                text.strip().upper() not in VALID_INPUTS and
+                not date_candidate
+            ):
+                await db.execute("DELETE FROM incomplete_shift_info WHERE sender = $1", sender)
+                return {
+                    "message": "Hello! How can I assist you today?"
+                }
+
+            # ✅ Try to match valid inputs
+            if text.strip().upper() in ["CNA", "LVN", "RN"]:
+                incomplete["nurse_type"] = text.strip().upper()
+                await update_conversation_state(sender, db, {"nurse_type": text.strip().upper()})
+
+            elif text.strip().upper() in ["AM", "PM", "NOC"]:
+                incomplete["shift"] = text.strip().upper()
+                await update_conversation_state(sender, db, {"shift": text.strip().upper()})
+
+            elif date_candidate:
+                iso_date_str = date_candidate  # e.g., '2025-08-24'
+                incomplete["date"] = iso_date_str
+                await update_conversation_state(sender, db, {"date": iso_date_str})
+
+            # ✅ Step C: Check what's still missing
+            missing_parts = []
+            if not incomplete.get("nurse_type"):
+                missing_parts.append("nurse type (CNA/LVN/RN)")
+            if not incomplete.get("shift"):
+                missing_parts.append("shift (AM/PM/NOC)")
+            if not incomplete.get("date"):
+                missing_parts.append("date")
+
+            if missing_parts:
+                return {
+                    "message": "To create a shift, I still need: " + ", ".join(missing_parts)
+                }
+            else:
+                # ✅ All required parts have been collected, proceed
+                reply_message["nurse_details"] = [{
+                    "nurse_type": incomplete["nurse_type"],
+                    "shift": incomplete["shift"],
+                    "date": incomplete["date"]
+                }]
+                reply_message["intent"] = "create_shift"
+
         VALID_NURSE_TYPES = ["CNA", "LVN", "RN"]
 
         if reply_message.get("nurse_details"):
@@ -598,7 +676,7 @@ async def coordinator_chat_bot(sender,text):
 
                 if not reply_message.get("instruction_update_target") and additional_instructions:
                     last = await db.fetchval(
-                        "SELECT last_created_shift FROM coordinator WHERE coordinator_phone = $1 OR coordinator_email = $1",
+                        "SELECT last_created_shift FROM coordinator WHERE (coordinator_phone = $1 OR coordinator_email = $1) AND is_deleted = false",
                         sender
                     )
                     if last:
@@ -632,7 +710,7 @@ async def coordinator_chat_bot(sender,text):
                         await update_coordinator_chat_history(sender, msg, "sent")
                         return {"message": msg}
 
-                shift_date = datetime.strptime(date, "%Y-%m-%d").date()
+                shift_date = normalize_to_date(date)
                 today = datetime.now().date()
                 now = datetime.now().time()
 
@@ -683,7 +761,7 @@ async def coordinator_chat_bot(sender,text):
                     if time_fields:
                         shift_start_field, shift_end_field = time_fields
                         coordinator = await db.fetchrow(
-                            "SELECT facility_id FROM coordinator WHERE coordinator_phone = $1 OR coordinator_email = $1",
+                            "SELECT facility_id FROM coordinator WHERE (coordinator_phone = $1 OR coordinator_email = $1) AND is_deleted = false",
                             sender
                         )
                         if coordinator:
@@ -729,6 +807,7 @@ async def coordinator_chat_bot(sender,text):
                     }),
                     sender
                 )
+                await db.execute("DELETE FROM incomplete_shift_info WHERE sender = $1", sender)
 
                 shift_id = shift_result
                 nurses = await search_nurses(nurse_type, shift, shift_id)
