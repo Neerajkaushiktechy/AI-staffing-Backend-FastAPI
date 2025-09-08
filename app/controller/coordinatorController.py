@@ -434,6 +434,42 @@ def is_greeting(text):
     cleaned = text.strip().lower()
     return any(cleaned.startswith(greet) for greet in greetings)
 
+def is_intended_shift_message(text: str) -> bool:
+    """
+    Detects if the message is intended for shift booking
+    by checking keywords or valid date formats.
+    """
+    text = text.lower().strip()
+
+    # ✅ 1. Keyword-based detection
+    if re.search(r"\b(shift|am|pm|noc|book|booking|schedule|nurse|cna|lvn|rn|date|delete|get|provide|what|available|open|filled|today|tomorrow)\b", text):
+        return True
+
+    # ✅ 2. Date-based detection
+    date_formats = ["%m/%d", "%m-%d", "%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"]
+    for fmt in date_formats:
+        try:                                    
+            datetime.strptime(text, fmt)
+            return True
+        except ValueError:
+            continue
+
+    # ✅ 3. Regex date patterns (handles partials like 9/6)
+    if re.match(r"^\d{1,2}[/\-]\d{1,2}([/\-]\d{2,4})?$", text):
+        return True
+
+    return False
+
+def is_search_intent(text: str) -> bool:
+    text = text.lower()
+    return (
+        ("shift" in text)
+        and (
+            re.search(r"\b(what|show|list|get)\b", text)
+            or re.search(r"\b(open|available|filled)\b", text)
+        )
+    )
+
 async def coordinator_chat_bot(sender,text):
     from app.helper.promptHelper import generateReplyFromAI
     from app.controller.nurseController import search_nurses, send_nurses_message
@@ -484,6 +520,18 @@ async def coordinator_chat_bot(sender,text):
         await cache.delete(sender + "_pending_instruction")
 
     try:
+
+        # ❌ If not intended → skip AI and just reply politely
+        if not is_intended_shift_message(text) and not is_greeting(text):
+            await db.execute("""
+        DELETE FROM incomplete_shift_info
+        WHERE sender = $1
+    """, sender)
+
+            return {
+                "message": "Hello! How can I assist you today?",
+                "nurse_details": None
+            }
         reply_message = await generateReplyFromAI(text, past_messages)
         print("AI Reply:", reply_message)
         if isinstance(reply_message, str):
@@ -578,44 +626,82 @@ async def coordinator_chat_bot(sender,text):
                 "message": "Hello! How can I assist you today?",
                 "nurse_details": None
             }
+        
+        # 🚨 Handle search first so create-flow does not hijack it
+        if is_search_intent(text):
+            reply_message["intent"] = "search_shifts"
+            # return reply_message
+        
         # Step A: Load partial state if exists
         # 
-        if not reply_message.get("nurse_details") and not reply_message.get("intent") == "create_shift":
+        # if not reply_message.get("nurse_details") and not reply_message.get("intent") == "create_shift":
+        if (not reply_message.get("nurse_details")and reply_message.get("intent") not in ["create_shift", "search_shifts"]):
             incomplete = await get_conversation_state(sender, db)
 
-            # ✅ Detect if the user is in a partially filled state
-            has_partial_info = incomplete.get("nurse_type") or incomplete.get("shift") or incomplete.get("date")
+            # 2️⃣ Parse user input (FIXED)
+            user_input = text.upper()
+            parts = [p.strip() for p in user_input.replace(",", " ").split() if p.strip()]
 
-            # ✅ Check for valid inputs
-            VALID_INPUTS = ["CNA", "LVN", "RN", "AM", "PM", "NOC"]
-            date_candidate = extract_date_from_text(text)
+            found_nurse_type = next((p for p in parts if p in ["CNA", "LVN", "RN"]), None)
+            found_shift = next((p for p in parts if p in ["AM", "PM", "NOC"]), None)
+            # found_date = next(
+            #     (extract_date_from_text(p) for p in parts if extract_date_from_text(p)), None
+            # )
 
-            # ❌ If ambiguous or irrelevant message is sent during incomplete state, reset
+            found_date = None
+            for p in parts:
+                parsed = extract_date_from_text(p)
+                if parsed:
+                    found_date = parsed
+                    break
+
+
+            # Count how many fields are in this message
+            # new_fields_count = len([x for x in [found_nurse_type, found_shift, found_date] if x])
+
+            # ✅ If message contains at least 2 new fields → start a fresh shift request
+            # if new_fields_count >= 2:
+            #     await db.execute("DELETE FROM incomplete_shift_info WHERE sender = $1", sender)
+            #     incomplete = {"nurse_type": None, "shift": None, "date": None}
+
+            # Detect if user is in an incomplete flow
+            has_partial_info = any([
+                incomplete.get("nurse_type"),
+                incomplete.get("shift"),
+                incomplete.get("date")
+            ])
+
+            # ❌ If user sends something irrelevant during incomplete state → reset conversation
             if (
-                has_partial_info and
-                text.strip().upper() not in VALID_INPUTS and
-                not date_candidate
+                has_partial_info
+                and not found_nurse_type
+                and not found_shift
+                and not found_date
             ):
                 await db.execute("DELETE FROM incomplete_shift_info WHERE sender = $1", sender)
                 return {
                     "message": "Hello! How can I assist you today?"
                 }
 
-            # ✅ Try to match valid inputs
-            if text.strip().upper() in ["CNA", "LVN", "RN"]:
-                incomplete["nurse_type"] = text.strip().upper()
-                await update_conversation_state(sender, db, {"nurse_type": text.strip().upper()})
+            # ✅ Update conversation state with any found values
+            if found_nurse_type:
+                incomplete["nurse_type"] = found_nurse_type
+                await update_conversation_state(sender, db, {"nurse_type": found_nurse_type})
 
-            elif text.strip().upper() in ["AM", "PM", "NOC"]:
-                incomplete["shift"] = text.strip().upper()
-                await update_conversation_state(sender, db, {"shift": text.strip().upper()})
+            if found_shift:
+                incomplete["shift"] = found_shift
+                await update_conversation_state(sender, db, {"shift": found_shift})
 
-            elif date_candidate:
-                iso_date_str = date_candidate  # e.g., '2025-08-24'
-                incomplete["date"] = iso_date_str
-                await update_conversation_state(sender, db, {"date": iso_date_str})
+            # if found_date:
+            #     iso_date_str = found_date
+            #     incomplete["date"] = iso_date_str
+            #     await update_conversation_state(sender, db, {"date": iso_date_str})
 
-            # ✅ Step C: Check what's still missing
+            if found_date:
+                incomplete["date"] = found_date.isoformat()
+                await update_conversation_state(sender, db, {"date": found_date})
+
+            # ✅ Check if any fields are still missing
             missing_parts = []
             if not incomplete.get("nurse_type"):
                 missing_parts.append("nurse type (CNA/LVN/RN)")
@@ -628,14 +714,13 @@ async def coordinator_chat_bot(sender,text):
                 return {
                     "message": "To create a shift, I still need: " + ", ".join(missing_parts)
                 }
-            else:
-                # ✅ All required parts have been collected, proceed
-                reply_message["nurse_details"] = [{
-                    "nurse_type": incomplete["nurse_type"],
-                    "shift": incomplete["shift"],
-                    "date": incomplete["date"]
-                }]
-                reply_message["intent"] = "create_shift"
+            # ✅ If all fields are available → proceed with shift creation
+            reply_message["nurse_details"] = [{
+                "nurse_type": incomplete["nurse_type"],
+                "shift": incomplete["shift"],
+                "date": incomplete["date"]
+            }]
+            reply_message["intent"] = "create_shift"
 
         VALID_NURSE_TYPES = ["CNA", "LVN", "RN"]
 
@@ -658,6 +743,9 @@ async def coordinator_chat_bot(sender,text):
                 date = nurse_detail["date"]
                 additional_instructions = nurse_detail.get("additional_instructions", "")
 
+                if not nurse_type:
+                    failed_shifts.append(f"The nurse type '{nurse_type}' is not valid. Valid types: {', '.join(VALID_NURSE_TYPES)}.")
+                    continue
                 # Check for invalid nurse type spelling
                 if nurse_type.upper() not in VALID_NURSE_TYPES:
                     failed_shifts.append(f"The nurse type '{nurse_type}' is not valid. Valid types: {', '.join(VALID_NURSE_TYPES)}.")

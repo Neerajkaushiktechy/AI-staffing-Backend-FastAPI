@@ -68,6 +68,11 @@ async def search_nurses(nurse_type: str, shift: str, shift_id: int):
         return []
 
 async def send_nurses_message(nurses, nurse_type: str, shift: str, shift_id: int, date: str, additional_instructions: str):
+
+    # ✅ Reset resend_done for all nurses before Error fetching nursesmessages
+    for nurse in nurses:
+        phone_number = nurse["mobile_number"]
+        await cache.delete(phone_number + "_resend_done")  # ensures resend_done is None / False
     for nurse in nurses:
         phone_number = nurse["mobile_number"]
         print(f"Sending message to nurse: {phone_number}")
@@ -277,31 +282,30 @@ async def admin_get_nurses(request: Request, response: Response):
 
         base_query = "SELECT * FROM nurses"
         count_query = "SELECT COUNT(*) FROM nurses"
-        query_params = []
-        conditions = ["is_deleted = FALSE"]  # 👈 exclude deleted nurses
+        conditions = ["is_deleted = FALSE"]  # exclude deleted nurses
+        search_params = []  # separate params for search only
 
         if search:
             conditions.append("""
                 (first_name ILIKE $1 OR last_name ILIKE $1 OR email ILIKE $1 
                 OR mobile_number ILIKE $1 OR shift ILIKE $1 OR nurse_type ILIKE $1)
             """)
-            query_params.append(f"%{search}%")
+            search_params.append(f"%{search}%")
 
         if conditions:
             where_clause = " WHERE " + " AND ".join(conditions)
             base_query += where_clause
             count_query += where_clause
 
-        # Add LIMIT & OFFSET
-        base_query += f" ORDER BY last_name ASC, first_name ASC LIMIT ${len(query_params)+1} OFFSET ${len(query_params)+2}"
-        query_params += [limit, offset]
-
-        # Total count
-        count_result = await conn.fetchrow(count_query, *query_params if search else [])
+        # Total count (only needs search params)
+        count_result = await conn.fetchrow(count_query, *search_params)
         total = int(count_result["count"])
 
-        # Data
-        rows = await conn.fetch(base_query, *query_params)
+        # Now build query for data
+        base_query += f" ORDER BY last_name ASC, first_name ASC LIMIT ${len(search_params)+1} OFFSET ${len(search_params)+2}"
+        data_params = search_params + [limit, offset]
+
+        rows = await conn.fetch(base_query, *data_params)
         nurses = [dict(row) for row in rows]
 
         return {
@@ -372,11 +376,11 @@ async def admin_add_nurse(request: Request, response: Response):
             email_conflict = existing.get("coordinator_email") == email
 
             if phone_conflict and email_conflict:
-                message = "Email and mobile number already exist."
+                message = "Coordinator with this Email and mobile number already exist."
             elif email_conflict:
-                message = "Email already exists."
+                message = "Coordinator with this Email already exists."
             elif phone_conflict:
-                message = "Mobile number already exists."
+                message = "Coordinator with this Mobile number already exists."
             else:
                 message = "Coordinator already exists."
 
@@ -850,15 +854,20 @@ async def nurse_chat_bot(sender, text):
         await update_nurse_chat_history(sender, reply_message["message"], "sent")
         print("replyMessage for nurse:", reply_message)
 
-        resend_shift_id = await cache.get(sender + "_resend_notification_shift_id")
+        # resend_shift_id = await cache.get(sender + "_resend_notification_shift_id")
         facility_names = reply_message.get("facility_name")
-        print(facility_names,"Hi Priya")
+        resend_shift_id = await cache.get(sender + "_resend_notification_shift_id")
+        resend_done = await cache.get(sender + "_resend_done")
+        # ✅ Agar user ne ek baar Yes/No bol diya hai
+        if resend_done:
+            return {"message": "All set! Let me know if you need anything else 😊"}
         if resend_shift_id:
             if text.lower().strip() == "yes":
                 shift_detail = await search_shift_by_id(resend_shift_id)
 
                 if not shift_detail:
                     await cache.delete(sender + "_resend_notification_shift_id")
+                    await cache.set(sender + "_resend_done", True)   # ✅ mark as completed
                     return {"message": "❌ Sorry, the shift was not found or may have been removed."}
 
                 shift_date = shift_detail["date"]
@@ -870,12 +879,14 @@ async def nurse_chat_bot(sender, text):
                 valid_shift = await check_shift_validity(resend_shift_id, sender)
                 if not valid_shift:
                     await cache.delete(sender + "_resend_notification_shift_id")
+                    await cache.set(sender + "_resend_done", True)
                     return {"message": "❌ Sorry, you're not eligible for this shift anymore."}
 
                 # ✅ Check if shift already filled
                 status = await check_shift_status(resend_shift_id, sender)
                 if status == "filled":
                     await cache.delete(sender + "_resend_notification_shift_id")
+                    await cache.set(sender + "_resend_done", True)
                     return {"message": f"❌ Sorry, the shift on {convert_to_md(shift_date)} is already filled."}
 
                 # ✅ Optional: Add half-shift time passed check if needed
@@ -890,13 +901,17 @@ async def nurse_chat_bot(sender, text):
                 # ✅ If all checks pass
                 await update_coordinator(resend_shift_id, sender)
                 await cache.delete(sender + "_resend_notification_shift_id")
-                return {"message": f"Thanks! I've marked you for the selected shift on {convert_to_md(shift_date)}."}
-
+                await cache.set(sender + "_resend_done", True)
+                return {"message": f"Thanks! I've marked you for the shift on {convert_to_md(shift_date)}."}
 
             elif text.lower().strip() == "no":
                 await cache.delete(sender + "_resend_notification_shift_id")
+                await cache.set(sender + "_resend_done", True)
                 return {"message": "❎ No problem. Let us know if you're available for another shift."}
 
+        if not resend_shift_id and resend_done:
+            await cache.delete(sender + "_resend_done")
+            resend_done = False
         # Helper function to format date
         def format_date(date_str: str) -> str:
             dt = datetime.strptime(normalize_date(date_str), "%Y-%m-%d")

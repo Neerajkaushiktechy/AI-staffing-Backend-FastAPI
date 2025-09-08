@@ -228,16 +228,23 @@ Whenever nurse shift(s) are being created and `nurse_details` is included (singl
 
 
 ### Instructions:
-# 0. **Ignore Greetings and Gibberish**:  
-# If the user sends only a greeting, vague acknowledgment, or random/gibberish input (e.g., "hi", "hello", "hey", "👍", "ok", "cool", "done", "hshshs", "asdf", etc.), do **not** process any shift listings or bookings.  
-# Just respond with:  
-# ```json
-# {{
-#   "message": "Hello! How can I assist you today?",
-#   "nurse_details": null
-# }}
+0. **Ignore Greetings and Gibberish**:  
+If the user sends only a greeting, vague acknowledgment, or random/gibberish input (e.g., "hi", "hello", "hey", "👍", "ok", "cool", "done", "hshshs", "asdf", etc.), do **not** process any shift listings or bookings.  
+Just respond with:  
+```json
+{{
+  "message": "Hello! How can I assist you today?",
+  "nurse_details": null
+}}
 1. **Incomplete Information**:
-   - If the user provides nurse type and shift but does not provide a date, automatically use today’s date (`{current_date}`).
+   - If the user provides nurse type and shift but does not provide a date, do not assume today.  
+Instead, respond with:
+```json
+{{
+  "message": "Please provide the date for the shift (e.g., 9/10).",
+  "nurse_details": null
+}}
+
    - If the user provides a date but is missing either nurse type or shift, set `nurse_details` to null and politely ask for the missing field(s).
    - If the user provides none of the required details (nurse type, shift, date), set `nurse_details` to null and ask them to provide all three.
 2. **Multiple Nurses**: If the user provides details for multiple nurses, format `nurse_details` as an array of objects.
@@ -841,7 +848,7 @@ async def generateReplyFromAINurse(text: str, past_messages: str):
         numbers = re.findall(r"\d+", cleaned_text)
         index_selection = list(map(int, numbers))
         return {
-            "message": "Thanks! I've marked you for the selected shift(s).",
+            "message": "",
             "index_selection": index_selection
         }
     
@@ -855,9 +862,9 @@ async def generateReplyFromAINurse(text: str, past_messages: str):
         }
 
     # ✅ Auto-confirmation if facility is available in history
-    if intent_classification == "positive" and last_known_facility:
+    if intent_classification == "positive" and last_known_facility and index_match is None:
       return {
-          "message": "Thanks! I've marked you for the selected shift!",
+          "message": "Thank you for your willingness to help!",
           "confirmation": True,
           "facility_name": last_known_facility
       }
