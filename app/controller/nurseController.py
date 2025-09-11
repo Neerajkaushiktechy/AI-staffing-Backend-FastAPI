@@ -489,11 +489,11 @@ async def admin_edit_nurse(request: Request, response: Response, id: int):
             email_conflict = existing.get("coordinator_email").lower() == email.lower()
 
             if phone_conflict and email_conflict:
-                message = "This email and phone number are already used by a coordinator"
+                message = "Coordinator with this email and phone number already exists"
             elif email_conflict:
-                message = "This email is already used by a coordinator"
+                message = "Coordinator with this email is already exists"
             elif phone_conflict:
-                message = "This phone number is already used by a coordinator"
+                message = "Coordinator with this phone number is already exists"
             else:
                 message = "Coordinator already exists"
 
@@ -964,7 +964,7 @@ async def nurse_chat_bot(sender, text):
                             "",  # 👈 adds spacing above shift listing
                             *formatted_items,
                             "",
-                            "👉 Reply with the number to grab your shift ✅"
+                            "👉 Reply with the number(e.g. 1,2 ) to grab your shift ✅"
                         ]
                         message = "\n".join(msg_lines)
 

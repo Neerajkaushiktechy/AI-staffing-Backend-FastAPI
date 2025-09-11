@@ -553,6 +553,8 @@ async def admin_get_facility_by_id(request: Request, response: Response, id: int
 async def admin_delete_facility(request: Request, response: Response, id: int):
     try:
         await db.execute("UPDATE facilities SET is_deleted = true WHERE id = $1", id)
+        # Mark coordinators linked to this facility as deleted
+        # await db.execute("UPDATE coordinator SET is_deleted = true WHERE facility_id = $1", id)
         return JSONResponse(content={"message": "Facility deleted successfully", "status": 200})
     except Exception as e:
         print("Error deleting facility:", e)

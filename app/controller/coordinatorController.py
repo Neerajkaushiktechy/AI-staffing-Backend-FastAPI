@@ -879,8 +879,22 @@ async def coordinator_chat_bot(sender,text):
                                     )
                                     continue
 
+                # Convert raw date into date object
+                if isinstance(date, str):
+                    parsed = extract_date_from_text(date)
+                    if not parsed:
+                        raise ValueError(f"Invalid date string format: {date}. Expected 'YYYY-MM-DD'.")
+                    date_obj = parsed
+                elif isinstance(date, (datetime, date)):
+                    date_obj = date if isinstance(date, date) else date.date()
+                else:
+                    raise ValueError(f"Unsupported date type: {type(date)}")
+
+                # Always store/send in YYYY-MM-DD
+                date_str = date_obj.strftime("%Y-%m-%d")
+
                 # Proceed with Shift Creation
-                shift_result = await create_shift(sender, nurse_type, shift, date, additional_instructions)
+                shift_result = await create_shift(sender, nurse_type, shift, date_str, additional_instructions)
                 if isinstance(shift_result, dict) and "error" in shift_result:
                     failed_shifts.append(shift_result["error"])
                     continue
@@ -891,7 +905,7 @@ async def coordinator_chat_bot(sender,text):
                         "shift_id": shift_result,
                         "nurse_type": nurse_type,
                         "shift": shift,
-                        "date": date
+                        "date": date_str
                     }),
                     sender
                 )
@@ -899,7 +913,31 @@ async def coordinator_chat_bot(sender,text):
 
                 shift_id = shift_result
                 nurses = await search_nurses(nurse_type, shift, shift_id)
-                await send_nurses_message(nurses, nurse_type, shift, shift_id, date, additional_instructions)
+                # ✅ Filter out nurses who already accepted this shift type on the same date
+                filtered_nurses = []
+                for nurse in nurses:
+                    nurse_id = nurse["id"]
+                    nurse_mobile = nurse["mobile_number"]
+
+                    existing = await db.fetchval("""
+                        SELECT 1 FROM shift_tracker
+                        WHERE nurse_id = $1
+                        AND date = $2
+                        AND shift = $3
+                        AND status = 'filled'
+                        AND is_deleted = false
+                        LIMIT 1
+                    """, nurse_id,  date_obj, shift)
+                    print(existing,nurse_mobile, "existingg")
+
+                    if not existing:
+                        filtered_nurses.append(nurse)
+                    else:
+                        print(f"Skipping nurse {nurse_id} — already has {shift} on {date}")
+                        print("Found nurses:", nurses)
+                        print(filtered_nurses,"filtered nursess")
+                if filtered_nurses:
+                    await send_nurses_message(filtered_nurses, nurse_type, shift, shift_id, date, additional_instructions)
 
                 created_shifts.append(f"{nurse_type} {shift} on {convert_to_md(date)}")
 
